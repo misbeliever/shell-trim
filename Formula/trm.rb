@@ -2,23 +2,23 @@
 class Trm < Formula
   desc "Fast, zero-dependency Rust CLI that trims shell output for AI coding agents"
   homepage "https://github.com/misbeliever/shell-trim"
-  version "0.1.0"
+  version "0.2.0"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/misbeliever/shell-trim/releases/download/v#{version}/trm-macos-arm64.tar.gz"
-      sha256 "15b1f0ed28c818d0879d3d0283cb7b4fbdaa5c8dd8a2698619f8bdaf98a2cfc0"
+      sha256 "8fa6d915b9e889b0a8addd70c09efcbfabd473ca391bbfa0439a93dffc8ff611"
     end
     on_intel do
       url "https://github.com/misbeliever/shell-trim/releases/download/v#{version}/trm-macos-x86_64.tar.gz"
-      sha256 "91c12f7b36728b650cfd20cfcd6dd64ea9a173fdea6e3530d703dd6ea32cb737"
+      sha256 "20a308a4374b0aae3bb1e124eb8cd426d618640e416438289ad0613cb591ad4b"
     end
   end
 
   on_linux do
     url "https://github.com/misbeliever/shell-trim/releases/download/v#{version}/trm-linux-x86_64.tar.gz"
-    sha256 "65774092ea496110b7a39fa230d1d2fbb19e9ff1bca79a5cc9cdf52ea87900ac"
+    sha256 "e37f12154552aed1a1e8dc6a78ae2365608b8bc96df296d8591ea64211f7e82f"
   end
 
   depends_on "ripgrep"
