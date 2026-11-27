@@ -1,0 +1,7 @@
+[L23-L28]
+// Handle formats a greeting response for the caller.
+func (s *Server) Handle(name string) string {
+	// inline comment to remove in minimal mode
+	msg := "http://example.com/{id} /* literal */"
+	return fmt.Sprintf("%s -> %s (%s)", s.Addr, name, msg)
+}

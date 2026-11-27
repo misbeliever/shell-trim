@@ -1,15 +1,21 @@
 [package]
 name = "trm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Fast, language-aware shell output trimmer for AI coding agents"
+license = "MIT"
+repository = "https://github.com/misbeliever/shell-trim"
+readme = "README.md"
+keywords = ["cli", "ai", "agent", "tokens", "shell"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "trm"
 path = "src/main.rs"
 
 [profile.release]
-opt-level = 3
+opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true

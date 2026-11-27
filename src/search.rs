@@ -57,8 +57,10 @@ pub fn run(opts: &SearchOptions) -> Result<ExitCode, String> {
     let raw_str = String::from_utf8_lossy(&output.stdout);
 
     let has_explicit_context = opts.rg_args.iter().any(|a| {
-        matches!(a.as_str(), "-C" | "-A" | "-B" | "--context" | "--after-context" | "--before-context")
-            || a.starts_with("-C")
+        matches!(
+            a.as_str(),
+            "-C" | "-A" | "-B" | "--context" | "--after-context" | "--before-context"
+        ) || a.starts_with("-C")
             || a.starts_with("-A")
             || a.starts_with("-B")
     });
@@ -129,7 +131,11 @@ fn raw_str_line_count(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&b| b == b'\n').count().max(1)
 }
 
-fn format_grouped_or_raw(raw_str: &str, raw_bytes: usize, opts: &SearchOptions) -> (String, &'static str) {
+fn format_grouped_or_raw(
+    raw_str: &str,
+    raw_bytes: usize,
+    opts: &SearchOptions,
+) -> (String, &'static str) {
     let cfg = Config::load();
     let max_total = if opts.all {
         usize::MAX

@@ -54,15 +54,21 @@ pub fn run(opts: &ExecTrimOptions) -> Result<ExitCode, String> {
     let raw_bytes = output.stdout.len();
     let raw_str = String::from_utf8_lossy(&output.stdout);
 
-    let (rendered, eff_mode) = if opts.raw || subcmd != "diff" || is_already_compact_diff(&opts.args[1..]) {
-        (raw_str.into_owned(), "raw")
-    } else {
+    let should_trim_diff = !opts.raw
+        && ((subcmd == "diff" && !is_already_compact_diff(&opts.args[1..]))
+            || (subcmd == "show"
+                && !is_already_compact_show(&opts.args[1..])
+                && (raw_str.starts_with("diff --git ") || raw_str.contains("\ndiff --git "))));
+
+    let (rendered, eff_mode) = if should_trim_diff {
         let trimmed = trim_git_diff(&raw_str, opts.all);
         if trimmed.len() >= raw_bytes {
             (raw_str.into_owned(), "raw")
         } else {
             (trimmed, if opts.all { "all" } else { "trimmed" })
         }
+    } else {
+        (raw_str.into_owned(), "raw")
     };
 
     let out_bytes = rendered.len();
@@ -70,7 +76,7 @@ pub fn run(opts: &ExecTrimOptions) -> Result<ExitCode, String> {
         .write_all(rendered.as_bytes())
         .map_err(|e| format!("write failed: {e}"))?;
 
-    if opts.log_stats && matches!(subcmd, "diff" | "status" | "log") {
+    if opts.log_stats && matches!(subcmd, "diff" | "status" | "log" | "show") {
         let key = format!("git:{subcmd}");
         let req_mode = if opts.raw {
             "raw"
@@ -130,6 +136,18 @@ fn is_already_compact_diff(args: &[String]) -> bool {
             "--stat" | "--shortstat" | "--numstat" | "--name-only" | "--name-status"
         )
     })
+}
+
+fn is_already_compact_show(args: &[String]) -> bool {
+    is_already_compact_diff(args)
+        || args.iter().any(|a| {
+            a == "-s"
+                || a == "--no-patch"
+                || a == "--oneline"
+                || a.starts_with("--format")
+                || a.starts_with("--pretty")
+                || (!a.starts_with('-') && a.contains(':'))
+        })
 }
 
 fn run_compact_status(extra_args: &[String], log_stats: bool) -> Result<ExitCode, String> {
@@ -297,14 +315,7 @@ fn run_compact_log(extra_args: &[String], log_stats: bool) -> Result<ExitCode, S
         let lines = raw_bytes_lines(&output.stdout);
         let est_raw = out_bytes + lines * 110;
         telemetry::log_cmd_event(
-            "git",
-            "git:log",
-            "git",
-            "auto",
-            "trimmed",
-            lines,
-            est_raw,
-            out_bytes,
+            "git", "git:log", "git", "auto", "trimmed", lines, est_raw, out_bytes,
         );
     }
 
@@ -428,5 +439,16 @@ index 333..444 100644
         assert!(trimmed.contains("=== src/lib.rs ==="));
         assert!(trimmed.contains("+let a = 2;"));
         assert!(!trimmed.contains("index 333..444"));
+    }
+
+    #[test]
+    fn recognizes_compact_show_args() {
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+        assert!(is_already_compact_show(&s(&["HEAD:src/main.rs"])));
+        assert!(is_already_compact_show(&s(&["--stat", "HEAD"])));
+        assert!(is_already_compact_show(&s(&["--format=%H", "HEAD"])));
+        assert!(is_already_compact_show(&s(&["-s", "HEAD"])));
+        assert!(!is_already_compact_show(&s(&["HEAD"])));
+        assert!(!is_already_compact_show(&s(&["abc123"])));
     }
 }

@@ -1,0 +1,14 @@
+[L24-L36]
+    @retry(
+        times=5,
+        delay=0.5,
+    )
+    async def run(self, payload: dict) -> str:
+        """Execute the job asynchronously."""
+        def inner_helper(x: int) -> int:
+            return x + 1
+
+        result = inner_helper(self.concurrency)
+        # inline debug comment
+        await asyncio.sleep(0)
+        return f"{self.name}:{result}:{len(payload)}"

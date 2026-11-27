@@ -126,7 +126,11 @@ pub fn compact_ls_long(raw: &str, show_all: bool) -> String {
 }
 
 pub fn compact_ls_plain(raw: &str, show_all: bool) -> String {
-    let entries: Vec<&str> = raw.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let entries: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     if entries.len() <= 12 {
         return raw.to_string();
     }
@@ -306,7 +310,10 @@ pub fn compact_find_output(raw: &str, show_all: bool) -> String {
         if skipped_noisy > 0 {
             notes.push(format!("{skipped_noisy} noisy build/git paths hidden"));
         }
-        out.push_str(&format!("[trm: {} — pass --all for full]\n", notes.join(", ")));
+        out.push_str(&format!(
+            "[trm: {} — pass --all for full]\n",
+            notes.join(", ")
+        ));
     }
 
     out
@@ -368,7 +375,10 @@ drwxr-xr-x  12 alice staff   384 Nov 26 12:00 src
 ";
         let out = compact_ls_long(raw, false);
         assert!(out.contains("dirs (1): src/"), "got: {out}");
-        assert!(out.contains("files (2): Cargo.toml, README.md (5K)"), "got: {out}");
+        assert!(
+            out.contains("files (2): Cargo.toml, README.md (5K)"),
+            "got: {out}"
+        );
         assert!(!out.contains("alice"), "should strip owner/perms: {out}");
     }
 

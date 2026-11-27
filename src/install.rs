@@ -1,17 +1,17 @@
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
 use crate::cli::InstallOptions;
+use crate::config::Config;
+use crate::json::{JsonParser, JsonValue};
 use crate::style::Theme;
 
 const MARKER_START: &str = "<!-- trm:start -->";
 const MARKER_END: &str = "<!-- trm:end -->";
-const LEGACY_START: &str = "<!-- strm:start -->";
-const LEGACY_END: &str = "<!-- strm:end -->";
 
 const CORE_RULE_LINES: &str = "\
 ## Shell Trimming (`trm`) — MANDATORY
@@ -21,89 +21,12 @@ NEVER run raw `cat`, `head`, `tail`, `sed -n`, `rg`, `grep`, `ls`, `find`, `git 
 
 const CLAUDE_HOOK_SCRIPT: &str = r#"#!/usr/bin/env bash
 # Optional Claude Code PreToolUse hook installed by `trm install --hook`.
-# Safely rewrites raw cat/head/tail/sed -n/rg/grep/ls/find/git/swift/cargo calls
-# (including simple `&&` chains) to `trm`, while skipping pipes, redirects, and heredocs.
-set -euo pipefail
-python3 -c '
-import json, sys
-
-try:
-    cmd = json.load(sys.stdin).get("tool_input", {}).get("command", "")
-except Exception:
-    sys.exit(0)
-
-if not cmd or any(ch in cmd for ch in ("\n", "|", ">", "<", "`", "$(")):
-    sys.exit(0)
-
-# Split on && outside quotes
-parts, buf, quote, i = [], [], None, 0
-while i < len(cmd):
-    c = cmd[i]
-    if quote:
-        buf.append(c)
-        if c == "\\" and quote == "\"" and i + 1 < len(cmd):
-            i += 1
-            buf.append(cmd[i])
-        elif c == quote:
-            quote = None
-    elif c in ("\"", "\x27"):
-        quote = c
-        buf.append(c)
-    elif c == "&" and i + 1 < len(cmd) and cmd[i + 1] == "&":
-        parts.append("".join(buf))
-        buf = []
-        i += 1
-    else:
-        buf.append(c)
-    i += 1
-if quote:
-    sys.exit(0)
-parts.append("".join(buf))
-
-PREFIXES = (
-    "cat ", "head ", "tail ", "sed -n ", "rg ", "grep ", "ls ", "find ",
-    "git status", "git diff", "git log",
-    "swift build", "swift test", "swiftc ",
-    "cargo build", "cargo test", "cargo check", "cargo clippy",
-)
-
-def should_wrap(seg: str) -> bool:
-    s = seg.strip()
-    if not s or s.startswith("trm ") or ";" in s:
-        return False
-    if s == "ls" or s == "find":
-        return True
-    if not s.startswith(PREFIXES):
-        return False
-    if s.startswith("find ") and any(f in s for f in (" -delete", " -exec", " -execdir", " -ok")):
-        return False
-    if s.startswith("git diff") and any(f in s for f in ("--stat", "--name-only", "--numstat")):
-        return False
-    if s.startswith("git status") and any(f in s for f in (" -s", "--short", "--porcelain")):
-        return False
-    if s.startswith("git log") and "--oneline" in s:
-        return False
-    return True
-
-changed = False
-new_parts = []
-for p in parts:
-    s = p.strip()
-    if should_wrap(s):
-        new_parts.append("trm " + s)
-        changed = True
-    else:
-        new_parts.append(s)
-
-if changed:
-    out = " && ".join(new_parts)
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {"command": out}}}))
-'
+exec trm hook claude
 "#;
 
 fn rule_block_for(agent: &str) -> String {
     let extra = match agent {
-        "antigravity" => Some(
+        "agy" => Some(
             "- Native `read_file`: for code files >260L, prefer `trm read <f>` (outline) or `trm read <f> -s <sym>` over `read_file` (keep `read_file` for images/PDFs or small slices)",
         ),
         "claude" => Some(
@@ -125,17 +48,12 @@ fn rule_block_for(agent: &str) -> String {
         None => format!("{MARKER_START}\n{CORE_RULE_LINES}\n{MARKER_END}"),
     };
     if agent == "cursor" {
-        format!("---\ndescription: Always use trm for shell file reads, searches, git, and builds\nalwaysApply: true\n---\n\n{body}")
+        format!(
+            "---\ndescription: Always use trm for shell file reads, searches, git, and builds\nalwaysApply: true\n---\n\n{body}"
+        )
     } else {
         body
     }
-}
-
-fn home_dir() -> PathBuf {
-    if let Ok(h) = env::var("TRM_HOME") {
-        return PathBuf::from(h);
-    }
-    PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into()))
 }
 
 fn want(only: &Option<String>, target: &str) -> bool {
@@ -147,7 +65,7 @@ pub fn run_install(opts: &InstallOptions) -> Result<(), String> {
         play_install_banner();
     }
 
-    let home = home_dir();
+    let home = Config::home_dir();
     let mut actions = 0usize;
 
     // 1. Codex: ~/.codex/AGENTS.md
@@ -156,18 +74,24 @@ pub fn run_install(opts: &InstallOptions) -> Result<(), String> {
         if codex_dir.exists() || opts.only.as_deref() == Some("codex") {
             let target = codex_dir.join("AGENTS.md");
             let status = upsert_rule_block(&target, &rule_block_for("codex"), opts.dry_run)?;
-            println!("  [codex]       {status:<9} {}", display_path(&target, &home));
+            println!(
+                "  [codex]       {status:<9} {}",
+                display_path(&target, &home)
+            );
             actions += 1;
         }
     }
 
-    // 2. Antigravity: ~/.gemini/config/GEMINI.md
-    if want(&opts.only, "antigravity") {
+    // 2. Agy (Antigravity CLI): ~/.gemini/config/GEMINI.md
+    if want(&opts.only, "agy") {
         let gemini_dir = home.join(".gemini");
-        if gemini_dir.exists() || opts.only.as_deref() == Some("antigravity") {
+        if gemini_dir.exists() || opts.only.as_deref() == Some("agy") {
             let target = gemini_dir.join("config").join("GEMINI.md");
-            let status = upsert_rule_block(&target, &rule_block_for("antigravity"), opts.dry_run)?;
-            println!("  [antigravity] {status:<9} {}", display_path(&target, &home));
+            let status = upsert_rule_block(&target, &rule_block_for("agy"), opts.dry_run)?;
+            println!(
+                "  [agy]         {status:<9} {}",
+                display_path(&target, &home)
+            );
             actions += 1;
         }
     }
@@ -178,7 +102,10 @@ pub fn run_install(opts: &InstallOptions) -> Result<(), String> {
         if claude_dir.exists() || opts.only.as_deref() == Some("claude") {
             let target = claude_dir.join("CLAUDE.md");
             let status = upsert_rule_block(&target, &rule_block_for("claude"), opts.dry_run)?;
-            println!("  [claude]      {status:<9} {}", display_path(&target, &home));
+            println!(
+                "  [claude]      {status:<9} {}",
+                display_path(&target, &home)
+            );
             actions += 1;
         }
     }
@@ -189,7 +116,10 @@ pub fn run_install(opts: &InstallOptions) -> Result<(), String> {
         if copilot_dir.exists() || opts.only.as_deref() == Some("copilot") {
             let target = copilot_dir.join("copilot-instructions.md");
             let status = upsert_rule_block(&target, &rule_block_for("copilot"), opts.dry_run)?;
-            println!("  [copilot]     {status:<9} {}", display_path(&target, &home));
+            println!(
+                "  [copilot]     {status:<9} {}",
+                display_path(&target, &home)
+            );
             actions += 1;
         }
     }
@@ -200,7 +130,10 @@ pub fn run_install(opts: &InstallOptions) -> Result<(), String> {
         if pi_dir.exists() || opts.only.as_deref() == Some("pi") {
             let target = pi_dir.join("agent").join("AGENTS.md");
             let status = upsert_rule_block(&target, &rule_block_for("pi"), opts.dry_run)?;
-            println!("  [pi]          {status:<9} {}", display_path(&target, &home));
+            println!(
+                "  [pi]          {status:<9} {}",
+                display_path(&target, &home)
+            );
             actions += 1;
         }
     }
@@ -211,37 +144,70 @@ pub fn run_install(opts: &InstallOptions) -> Result<(), String> {
         if cursor_dir.exists() || opts.only.as_deref() == Some("cursor") {
             let target = cursor_dir.join("rules").join("trm.mdc");
             let status = upsert_rule_block(&target, &rule_block_for("cursor"), opts.dry_run)?;
-            println!("  [cursor]      {status:<9} {}", display_path(&target, &home));
+            println!(
+                "  [cursor]      {status:<9} {}",
+                display_path(&target, &home)
+            );
+            println!(
+                "    note: Cursor desktop IDE may also need rule pasted into Settings -> Rules -> User Rules."
+            );
             actions += 1;
         }
     }
 
     // Optional Claude Code PreToolUse rewrite helper script
     if opts.hook && want(&opts.only, "claude") {
-        let hook_path = home.join(".claude").join("hooks").join("trm-rewrite.sh");
-        let status = if opts.dry_run {
-            "installed"
-        } else {
-            if let Some(parent) = hook_path.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        let claude_dir = home.join(".claude");
+        if claude_dir.exists() || opts.only.as_deref() == Some("claude") {
+            let hook_path = claude_dir.join("hooks").join("trm-rewrite.sh");
+            let status = if opts.dry_run {
+                "installed"
+            } else {
+                if let Some(parent) = hook_path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+                }
+                fs::write(&hook_path, CLAUDE_HOOK_SCRIPT)
+                    .map_err(|e| format!("cannot write {}: {e}", hook_path.display()))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755));
+                }
+                "installed"
+            };
+            println!(
+                "  [claude-hook] {status:<9} {}",
+                display_path(&hook_path, &home)
+            );
+            if !opts.dry_run {
+                println!(
+                    "    Add to ~/.claude/settings.json:\n    {{\"hooks\":{{\"PreToolUse\":[{{\"matcher\":\"Bash\",\"hooks\":[{{\"type\":\"command\",\"command\":\"~/.claude/hooks/trm-rewrite.sh\"}}]}}]}}}}"
+                );
             }
-            fs::write(&hook_path, CLAUDE_HOOK_SCRIPT)
-                .map_err(|e| format!("cannot write {}: {e}", hook_path.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&hook_path, fs::Permissions::from_mode(0o755));
-            }
-            "installed"
-        };
-        println!("  [claude-hook] {status:<9} {}", display_path(&hook_path, &home));
-        actions += 1;
+            actions += 1;
+        }
+    }
+
+    // Optional Agy PreToolUse hook in ~/.gemini/config/hooks.json
+    if opts.hook && want(&opts.only, "agy") {
+        let gemini_dir = home.join(".gemini");
+        if gemini_dir.exists() || opts.only.as_deref() == Some("agy") {
+            let hooks_path = gemini_dir.join("config").join("hooks.json");
+            let status = upsert_agy_hook(&hooks_path, opts.dry_run)?;
+            println!(
+                "  [agy-hook]    {status:<9} {}",
+                display_path(&hooks_path, &home)
+            );
+            actions += 1;
+        }
     }
 
     if actions == 0 {
-        println!("No supported agent directories detected (~/.codex, ~/.gemini, ~/.claude, ~/.copilot, ~/.pi, ~/.cursor).");
-        println!("Use --only codex|antigravity|claude|copilot|pi|cursor to install explicitly.");
+        println!(
+            "No supported agent directories detected (~/.codex, ~/.gemini, ~/.claude, ~/.copilot, ~/.pi, ~/.cursor)."
+        );
+        println!("Use --only codex|agy|claude|copilot|pi|cursor to install explicitly.");
     } else if opts.dry_run {
         println!("\n(dry-run: no files were modified)");
     } else {
@@ -308,21 +274,27 @@ fn play_install_banner() {
 }
 
 pub fn run_uninstall(opts: &InstallOptions) -> Result<(), String> {
-    let home = home_dir();
+    let home = Config::home_dir();
 
     if want(&opts.only, "codex") {
         let target = home.join(".codex").join("AGENTS.md");
         if target.exists() {
             let status = remove_rule_block(&target, opts.dry_run)?;
-            println!("  [codex]       {status:<9} {}", display_path(&target, &home));
+            println!(
+                "  [codex]       {status:<9} {}",
+                display_path(&target, &home)
+            );
         }
     }
 
-    if want(&opts.only, "antigravity") {
+    if want(&opts.only, "agy") {
         let target = home.join(".gemini").join("config").join("GEMINI.md");
         if target.exists() {
             let status = remove_rule_block(&target, opts.dry_run)?;
-            println!("  [antigravity] {status:<9} {}", display_path(&target, &home));
+            println!(
+                "  [agy]         {status:<9} {}",
+                display_path(&target, &home)
+            );
         }
     }
 
@@ -330,7 +302,10 @@ pub fn run_uninstall(opts: &InstallOptions) -> Result<(), String> {
         let target = home.join(".claude").join("CLAUDE.md");
         if target.exists() {
             let status = remove_rule_block(&target, opts.dry_run)?;
-            println!("  [claude]      {status:<9} {}", display_path(&target, &home));
+            println!(
+                "  [claude]      {status:<9} {}",
+                display_path(&target, &home)
+            );
         }
     }
 
@@ -338,7 +313,10 @@ pub fn run_uninstall(opts: &InstallOptions) -> Result<(), String> {
         let target = home.join(".copilot").join("copilot-instructions.md");
         if target.exists() {
             let status = remove_rule_block(&target, opts.dry_run)?;
-            println!("  [copilot]     {status:<9} {}", display_path(&target, &home));
+            println!(
+                "  [copilot]     {status:<9} {}",
+                display_path(&target, &home)
+            );
         }
     }
 
@@ -346,7 +324,10 @@ pub fn run_uninstall(opts: &InstallOptions) -> Result<(), String> {
         let target = home.join(".pi").join("agent").join("AGENTS.md");
         if target.exists() {
             let status = remove_rule_block(&target, opts.dry_run)?;
-            println!("  [pi]          {status:<9} {}", display_path(&target, &home));
+            println!(
+                "  [pi]          {status:<9} {}",
+                display_path(&target, &home)
+            );
         }
     }
 
@@ -356,7 +337,11 @@ pub fn run_uninstall(opts: &InstallOptions) -> Result<(), String> {
             if !opts.dry_run {
                 let _ = fs::remove_file(&target);
             }
-            println!("  [cursor]      {:<9} {}", "removed", display_path(&target, &home));
+            println!(
+                "  [cursor]      {:<9} {}",
+                "removed",
+                display_path(&target, &home)
+            );
         }
     }
 
@@ -366,7 +351,24 @@ pub fn run_uninstall(opts: &InstallOptions) -> Result<(), String> {
             if !opts.dry_run {
                 let _ = fs::remove_file(&hook_path);
             }
-            println!("  [claude-hook] {:<9} {}", "removed", display_path(&hook_path, &home));
+            println!(
+                "  [claude-hook] {:<9} {}",
+                "removed",
+                display_path(&hook_path, &home)
+            );
+        }
+    }
+
+    if want(&opts.only, "agy") {
+        let hooks_path = home.join(".gemini").join("config").join("hooks.json");
+        if hooks_path.exists() {
+            let status = remove_agy_hook(&hooks_path, opts.dry_run)?;
+            if status != "unchanged" {
+                println!(
+                    "  [agy-hook]    {status:<9} {}",
+                    display_path(&hooks_path, &home)
+                );
+            }
         }
     }
 
@@ -379,57 +381,28 @@ pub fn run_uninstall(opts: &InstallOptions) -> Result<(), String> {
     Ok(())
 }
 
-fn strip_fenced(existing: &str, start_m: &str, end_m: &str) -> Option<String> {
-    let (Some(s), Some(e)) = (existing.find(start_m), existing.find(end_m)) else {
-        return None;
-    };
-    if e < s {
-        return None;
-    }
-    let before = existing[..s].trim_end();
-    let after = existing[e + end_m.len()..].trim_start();
-    let cleaned = match (before.is_empty(), after.is_empty()) {
-        (true, true) => String::new(),
-        (true, false) => format!("{after}\n"),
-        (false, true) => format!("{before}\n"),
-        (false, false) => format!("{before}\n\n{after}\n"),
-    };
-    Some(cleaned)
-}
-
 fn upsert_rule_block(path: &Path, block: &str, dry_run: bool) -> Result<&'static str, String> {
-    let orig = if path.exists() {
+    let existing = if path.exists() {
         fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?
     } else {
         String::new()
     };
 
-    // Migrate away any legacy <!-- strm:start -->...<!-- strm:end --> block automatically
-    let had_legacy = orig.contains(LEGACY_START);
-    let existing = strip_fenced(&orig, LEGACY_START, LEGACY_END).unwrap_or_else(|| orig.clone());
-
-    let (new_content, status) = if let (Some(s), Some(e)) =
-        (existing.find(MARKER_START), existing.find(MARKER_END))
-    {
-        if e >= s {
-            let end_pos = e + MARKER_END.len();
-            let updated = format!("{}{}{}", &existing[..s], block, &existing[end_pos..]);
-            if updated == orig {
-                return Ok("unchanged");
+    let (new_content, status) =
+        if let (Some(s), Some(e)) = (existing.find(MARKER_START), existing.find(MARKER_END)) {
+            if e >= s {
+                let end_pos = e + MARKER_END.len();
+                let updated = format!("{}{}{}", &existing[..s], block, &existing[end_pos..]);
+                if updated == existing {
+                    return Ok("unchanged");
+                }
+                (updated, "updated")
+            } else {
+                (append_block(&existing, block), "installed")
             }
-            (updated, if had_legacy { "migrated" } else { "updated" })
         } else {
-            (
-                append_block(&existing, block),
-                if had_legacy { "migrated" } else { "installed" },
-            )
-        }
-    } else {
-        (
-            append_block(&existing, block),
-            if had_legacy { "migrated" } else { "installed" },
-        )
-    };
+            (append_block(&existing, block), "installed")
+        };
 
     if dry_run {
         return Ok(status);
@@ -488,5 +461,99 @@ fn display_path(path: &Path, home: &Path) -> String {
         format!("~/{}", rel.display())
     } else {
         path.display().to_string()
+    }
+}
+
+fn agy_hook_entry() -> JsonValue {
+    JsonValue::Object(vec![(
+        "PreToolUse".to_string(),
+        JsonValue::Array(vec![JsonValue::Object(vec![
+            (
+                "matcher".to_string(),
+                JsonValue::Str("run_command".to_string()),
+            ),
+            (
+                "hooks".to_string(),
+                JsonValue::Array(vec![JsonValue::Object(vec![
+                    ("type".to_string(), JsonValue::Str("command".to_string())),
+                    (
+                        "command".to_string(),
+                        JsonValue::Str("trm hook agy".to_string()),
+                    ),
+                    ("timeout".to_string(), JsonValue::Num(5.0)),
+                ])]),
+            ),
+        ])]),
+    )])
+}
+
+fn upsert_agy_hook(path: &Path, dry_run: bool) -> Result<&'static str, String> {
+    let entry = agy_hook_entry();
+    let (mut root, status) = if path.exists() {
+        let existing =
+            fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let mut parsed = if existing.trim().is_empty() {
+            JsonValue::Object(Vec::new())
+        } else {
+            JsonParser::parse(&existing)
+                .map_err(|e| format!("cannot parse {}: {e}", path.display()))?
+        };
+        let Some(entries) = parsed.as_object_mut() else {
+            return Err(format!("{} root must be a JSON object", path.display()));
+        };
+        if let Some((_, val)) = entries.iter_mut().find(|(k, _)| k == "trm-rewrite") {
+            if *val == entry {
+                return Ok("unchanged");
+            }
+            *val = entry;
+            (parsed, "updated")
+        } else {
+            entries.push(("trm-rewrite".to_string(), entry));
+            (parsed, "updated")
+        }
+    } else {
+        (
+            JsonValue::Object(vec![("trm-rewrite".to_string(), entry)]),
+            "created",
+        )
+    };
+
+    if !dry_run {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        let _ = &mut root;
+        fs::write(path, root.to_pretty_string(2))
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok(status)
+}
+
+fn remove_agy_hook(path: &Path, dry_run: bool) -> Result<&'static str, String> {
+    let existing =
+        fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let Ok(mut parsed) = JsonParser::parse(&existing) else {
+        return Ok("unchanged");
+    };
+    let Some(entries) = parsed.as_object_mut() else {
+        return Ok("unchanged");
+    };
+    let before = entries.len();
+    entries.retain(|(k, _)| k != "trm-rewrite");
+    if entries.len() == before {
+        return Ok("unchanged");
+    }
+    if entries.is_empty() {
+        if !dry_run {
+            let _ = fs::remove_file(path);
+        }
+        Ok("removed")
+    } else {
+        if !dry_run {
+            fs::write(path, parsed.to_pretty_string(2))
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        }
+        Ok("updated")
     }
 }

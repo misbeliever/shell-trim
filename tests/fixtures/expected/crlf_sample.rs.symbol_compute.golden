@@ -1,0 +1,6 @@
+[L2-L6]
+/// Doc comment kept in minimal
+pub fn compute(a: i32, b: i32) -> i32 {
+    // inner comment
+    a + b
+}

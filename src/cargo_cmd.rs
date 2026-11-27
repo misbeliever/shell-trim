@@ -64,7 +64,7 @@ pub fn run(opts: &ExecTrimOptions) -> Result<ExitCode, String> {
     Ok(ExitCode::from(code as u8))
 }
 
-fn combine_streams(stdout: &[u8], stderr: &[u8]) -> String {
+pub(crate) fn combine_streams(stdout: &[u8], stderr: &[u8]) -> String {
     let mut s = String::with_capacity(stdout.len() + stderr.len() + 1);
     if !stdout.is_empty() {
         s.push_str(&String::from_utf8_lossy(stdout));

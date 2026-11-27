@@ -1,0 +1,9 @@
+         L1| // 1 imports (express)
+       L3-9| export interface UserRecord
+        L11| export type Role = "admin" | "member";
+     L14-16| function Injectable()
+     L18-20| function Get(_path: string)
+     L22-37| export class UserController
+     L29-36|   async listUsers(_req: Request, _res: Response): Promise<UserRecord[]>
+     L39-42| export async function formatUser(user: UserRecord): Promise<string>
+[trm: outline of 42 lines (ts) — 'trm read tests/fixtures/ts_sample.ts -r START-END' or '-s <symbol>' for raw code]

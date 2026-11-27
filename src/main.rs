@@ -2,14 +2,19 @@ mod audit;
 mod cargo_cmd;
 mod cli;
 mod config;
+mod context_audit;
 mod doctor;
 mod export;
 mod filter;
 mod fs_cmd;
 mod git_cmd;
+mod hook;
+mod inspect;
 mod install;
+mod json;
 mod lang;
 mod outline;
+mod pipe;
 mod read;
 mod search;
 mod style;
@@ -79,6 +84,20 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Ok(cli::Command::Pipe(opts)) => match pipe::run(&opts) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("trm pipe: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(cli::Command::Hook(target)) => match hook::run(target) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("trm hook: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Ok(cli::Command::Ui(opts)) => match tui::run(&opts) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -104,6 +123,13 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("trm export: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(cli::Command::Inspect(opts)) => match inspect::run(&opts) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("trm inspect: {e}");
                 ExitCode::FAILURE
             }
         },

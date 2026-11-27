@@ -8,6 +8,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub small_lines: usize,
     pub outline_lines: usize,
+    pub minified_bytes: usize,
     pub rg_max_total: usize,
     pub rg_per_file: usize,
     pub rg_max_chars: usize,
@@ -19,6 +20,7 @@ impl Default for Config {
         Self {
             small_lines: 80,
             outline_lines: 260,
+            minified_bytes: 12_288,
             rg_max_total: 50,
             rg_per_file: 6,
             rg_max_chars: 180,
@@ -28,14 +30,22 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn home_dir() -> PathBuf {
+        PathBuf::from(
+            env::var("TRM_HOME")
+                .or_else(|_| env::var("HOME"))
+                .unwrap_or_else(|_| ".".into()),
+        )
+    }
+
     pub fn path() -> PathBuf {
         if let Ok(p) = env::var("TRM_CONFIG") {
             return PathBuf::from(p);
         }
-        let home = env::var("TRM_HOME")
-            .or_else(|_| env::var("HOME"))
-            .unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join(".config").join("trm").join("config.toml")
+        Self::home_dir()
+            .join(".config")
+            .join("trm")
+            .join("config.toml")
     }
 
     pub fn load() -> Self {
@@ -75,6 +85,11 @@ impl Config {
                 "outline_lines" | "read.outline_lines" => {
                     if let Ok(n) = val.parse() {
                         cfg.outline_lines = n;
+                    }
+                }
+                "minified_bytes" | "read.minified_bytes" => {
+                    if let Ok(n) = val.parse() {
+                        cfg.minified_bytes = n;
                     }
                 }
                 "rg_max_total" | "rg.max_total" => {

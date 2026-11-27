@@ -1,0 +1,7 @@
+       L1-3| # 3 imports
+       L6-8| def retry(
+     L10-11|     def wrapper(fn: Callable) -> Callable:
+     L17-36| class JobConfig:
+     L24-36|     async def run(self, payload: dict) -> str:
+     L30-31|         def inner_helper(x: int) -> int:
+[trm: outline of 36 lines (python) — 'trm read tests/fixtures/python_sample.py -r START-END' or '-s <symbol>' for raw code]

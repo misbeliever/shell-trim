@@ -1,0 +1,17 @@
+[L22-L37]
+/**
+ * Controller handling user endpoints.
+ */
+@Injectable()
+export class UserController {
+  private readonly pattern = /\{[a-z]+\}\/\//g;
+
+  @Get("/users")
+  async listUsers(_req: Request, _res: Response): Promise<UserRecord[]> {
+    const sample = "/* not a comment */ { }";
+    if (!this.pattern.test(sample)) {
+      return [];
+    }
+    return [{ id: "1", email: "a@example.com" }];
+  }
+}

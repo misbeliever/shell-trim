@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.0 — Context Audit, Pipe Trimming, Native Hooks & Redesigned TUI
+- **`trm audit --context`** (`--probe-mcp`, `--all`): audits static **turn-0** token tax across `agy`, `codex`, `claude`, `cursor`, `copilot`, and `pi` — scanning global & repo rules, enabled skills (skipping disabled plugins, `disable-model-invocation: true`, and `skills.json` exclusions), and configured MCP servers (with opt-in `--probe-mcp` stdio JSON-RPC `tools/list` schema sizing).
+- **`trm pipe`** (`cmd | trm`): automatic structured stdin trimming for piped JSON payloads, SQL/TSV tables, and deduplicated logs (keeping error/warn lines verbatim and respecting the never-expand guard).
+- **Native `PreToolUse` hooks (`trm hook agy|claude`)**: zero-token command rewriter with UTF-8-safe quote parsing and fail-open handling; `trm install --hook` (with `--dry-run` preview) wires `~/.gemini/config/hooks.json` for Antigravity (`agy`) and delegates `~/.claude/hooks/trm-rewrite.sh` to `exec trm hook claude` (with `settings.json` snippet + `trm doctor` verification).
+- **Redesigned `trm ui` (5-tab TUI)**: 4 KPI header cards (Net Saved + 7d sparkline, Adoption %, Health, Turn-0 Tax), active orange tab/window pills, 2-column wide `Overview`, new `[5 Context]` tab, arrow/`PgUp`/`PgDn`/`g`/`p` (pause) keys, ANSI-safe narrow-pane truncation, and newest-first large passthrough sorting.
+- **`trm inspect <report.json|->` & `trm export --anon`**: compact terminal summary for exported JSON reports, optional FNV-1a deterministic path hashing (`--anon` / `--hash-paths`) preserving file extensions, and full command redaction across `bypasses`, `misses`, and `large_passthroughs`.
+- **Smart trimming & accuracy upgrades**: per-language bytes-per-token factors (~3.2–4.2 B/tok), minified-file byte guard (`minified_bytes = 12288` in `auto` mode), `trm git show` diff trimming, `trm stats --recommend` per-language miss-rate & `rg --block` hints, canonical `agy` agent label (with `antigravity` alias), and atomic fallback telemetry flushing.
+- **Internal & build**: split `src/outline/` into modular parsers (`mod`, `brace`, `python`, `data`), added golden-file fixture tests (`tests/fixtures/`), shared zero-dep `src/json.rs`, and switched release profile to `opt-level = "s"` (~1.1 MB binary, zero external crates).
+
 ## v0.1.0 — Initial Release
 - **`trm read`** (aliases: `trm cat`, `trm head`, `trm tail`, `trm sed -n`): language-aware `auto`, `raw`, `minimal`, `outline`, `aggressive`, `-r` slices, `-s` symbol jump, `--head`/`--tail`/`-c`, multi-file reads, never-expand guard, Swift/Rust raw string & JS regex-safe lexing.
 - **`trm rg`** (alias: `trm grep`): file-grouped capped search, directory-grouped `--files`, automatic enclosing-block expansion on 1–3 focused hits (`--block`/`--no-block`).

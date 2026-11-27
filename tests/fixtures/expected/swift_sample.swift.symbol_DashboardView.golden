@@ -1,0 +1,26 @@
+[L35-L52]
+/// Primary dashboard view.
+@MainActor
+struct DashboardView: View {
+    @State private var title = "hello // not a comment /* or nested */"
+
+    var body: some View {
+        VStack {
+            Text(title)
+            Button("Refresh") {
+                reload()
+            }
+        }
+    }
+
+    private func reload() {
+        title = "reloaded"
+    }
+}
+
+[L54-L58]
+extension DashboardView {
+    func summary() -> String {
+        return title
+    }
+}

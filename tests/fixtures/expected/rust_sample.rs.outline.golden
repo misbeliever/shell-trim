@@ -1,0 +1,11 @@
+       L1-2| // 2 imports (std::collections::HashMap, std::fmt)
+       L4-7| pub trait Backend<'a>
+         L6|   fn get(&self, key: &'a str) -> Option<&str>;
+      L9-15| pub enum Status
+     L18-20| pub struct Registry<'a>
+     L22-36| impl<'a> Registry<'a>
+     L23-28|   pub fn new() -> Self
+     L30-35|   pub fn insert(&mut self, key: &'a str, val: &str)
+     L38-45| impl fmt::Display for Status
+     L39-44|   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+[trm: outline of 45 lines (rust) — 'trm read tests/fixtures/rust_sample.rs -r START-END' or '-s <symbol>' for raw code]

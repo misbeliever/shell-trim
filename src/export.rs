@@ -7,6 +7,7 @@ use crate::audit;
 use crate::cli::ExportOptions;
 use crate::config::Config;
 use crate::doctor;
+use crate::json::json_string as jstr;
 use crate::telemetry::{self, Bucket};
 
 pub fn run(opts: &ExportOptions) -> Result<(), String> {
@@ -14,24 +15,43 @@ pub fn run(opts: &ExportOptions) -> Result<(), String> {
     let stats = telemetry::load_snapshot(opts.since_secs);
     let audit_sum = audit::load_summary(opts.since_secs);
     let agents = doctor::installed_agents();
-    let home = env::var("TRM_HOME")
-        .or_else(|_| env::var("HOME"))
-        .unwrap_or_default();
+    let home = Config::home_dir().to_string_lossy().into_owned();
 
-    let clean = |s: &str| -> String {
-        if opts.redact {
+    let clean_path = |s: &str| -> String {
+        let base = if opts.redact {
             redact_text(s, &home)
         } else {
             s.to_string()
+        };
+        if opts.anon {
+            anonymize_path(&base)
+        } else {
+            base
+        }
+    };
+    let clean_cmd = |s: &str| -> String {
+        let base = if opts.redact {
+            redact_text(s, &home)
+        } else {
+            s.to_string()
+        };
+        if opts.anon {
+            anonymize_cmd(&base)
+        } else {
+            base
         }
     };
 
     let mut out = String::with_capacity(8192);
     out.push_str("{\n");
-    out.push_str(&format!("  \"trm_version\": {},\n", jstr(env!("CARGO_PKG_VERSION"))));
+    out.push_str(&format!(
+        "  \"trm_version\": {},\n",
+        jstr(env!("CARGO_PKG_VERSION"))
+    ));
     out.push_str(&format!("  \"os\": {},\n", jstr(env::consts::OS)));
     out.push_str(&format!("  \"arch\": {},\n", jstr(env::consts::ARCH)));
     out.push_str(&format!("  \"redacted\": {},\n", opts.redact));
+    out.push_str(&format!("  \"anonymized\": {},\n", opts.anon));
     match opts.since_secs {
         Some(s) => out.push_str(&format!("  \"since_secs\": {s},\n")),
         None => out.push_str("  \"since_secs\": null,\n"),
@@ -41,7 +61,10 @@ pub fn run(opts: &ExportOptions) -> Result<(), String> {
     out.push_str("  \"config\": {\n");
     out.push_str(&format!("    \"small_lines\": {},\n", cfg.small_lines));
     out.push_str(&format!("    \"outline_lines\": {},\n", cfg.outline_lines));
-    out.push_str(&format!("    \"reread_window_secs\": {},\n", cfg.reread_window_secs));
+    out.push_str(&format!(
+        "    \"reread_window_secs\": {},\n",
+        cfg.reread_window_secs
+    ));
     out.push_str(&format!("    \"rg_max_total\": {},\n", cfg.rg_max_total));
     out.push_str(&format!("    \"rg_per_file\": {},\n", cfg.rg_per_file));
     out.push_str(&format!("    \"rg_max_chars\": {}\n", cfg.rg_max_chars));
@@ -60,13 +83,28 @@ pub fn run(opts: &ExportOptions) -> Result<(), String> {
     out.push_str(&format!("    \"events\": {},\n", stats.events_count));
     out.push_str(&format!("    \"raw_tokens_est\": {},\n", stats.raw_tokens));
     out.push_str(&format!("    \"out_tokens_est\": {},\n", stats.out_tokens));
-    out.push_str(&format!("    \"gross_saved_tokens_est\": {},\n", stats.gross_saved));
-    out.push_str(&format!("    \"gross_saved_pct\": {:.1},\n", stats.gross_pct));
-    out.push_str(&format!("    \"net_saved_tokens_est\": {},\n", stats.net_saved));
+    out.push_str(&format!(
+        "    \"gross_saved_tokens_est\": {},\n",
+        stats.gross_saved
+    ));
+    out.push_str(&format!(
+        "    \"gross_saved_pct\": {:.1},\n",
+        stats.gross_pct
+    ));
+    out.push_str(&format!(
+        "    \"net_saved_tokens_est\": {},\n",
+        stats.net_saved
+    ));
     out.push_str(&format!("    \"net_saved_pct\": {:.1},\n", stats.net_pct));
     out.push_str(&format!("    \"trim_misses\": {},\n", stats.misses_count));
-    out.push_str(&format!("    \"wasted_tokens_est\": {},\n", stats.wasted_tokens));
-    out.push_str(&format!("    \"outline_drilldowns\": {},\n", stats.drilldowns));
+    out.push_str(&format!(
+        "    \"wasted_tokens_est\": {},\n",
+        stats.wasted_tokens
+    ));
+    out.push_str(&format!(
+        "    \"outline_drilldowns\": {},\n",
+        stats.drilldowns
+    ));
     out.push_str(&format!(
         "    \"large_passthroughs_count\": {},\n",
         stats.large_passthroughs.len()
@@ -87,10 +125,16 @@ pub fn run(opts: &ExportOptions) -> Result<(), String> {
 
     // Audit summary
     out.push_str("  \"audit\": {\n");
-    out.push_str(&format!("    \"files_scanned\": {},\n", audit_sum.files_scanned));
+    out.push_str(&format!(
+        "    \"files_scanned\": {},\n",
+        audit_sum.files_scanned
+    ));
     out.push_str(&format!("    \"adopted\": {},\n", audit_sum.adopted));
     out.push_str(&format!("    \"bypasses\": {},\n", audit_sum.bypasses));
-    out.push_str(&format!("    \"adoption_pct\": {:.1},\n", audit_sum.adoption_pct));
+    out.push_str(&format!(
+        "    \"adoption_pct\": {:.1},\n",
+        audit_sum.adoption_pct
+    ));
     out.push_str("    \"by_agent\": ");
     push_audit_rows_json(&mut out, &audit_sum.by_agent, 4);
     out.push_str(",\n");
@@ -102,7 +146,11 @@ pub fn run(opts: &ExportOptions) -> Result<(), String> {
     // Full untruncated trim misses
     out.push_str("  \"misses\": [\n");
     for (idx, m) in stats.misses.iter().enumerate() {
-        let comma = if idx + 1 < stats.misses.len() { "," } else { "" };
+        let comma = if idx + 1 < stats.misses.len() {
+            ","
+        } else {
+            ""
+        };
         let range_val = match m.followup_range.as_deref() {
             Some(r) => jstr(r),
             None => "null".to_string(),
@@ -112,8 +160,8 @@ pub fn run(opts: &ExportOptions) -> Result<(), String> {
             m.ts,
             jstr(&m.agent),
             jstr(&m.model_key),
-            jstr(&m.cmd),
-            jstr(&clean(&m.path)),
+            jstr(&clean_cmd(&m.cmd)),
+            jstr(&clean_path(&m.path)),
             jstr(&m.first_mode),
             jstr(&m.followup_mode),
             range_val,
@@ -142,7 +190,7 @@ pub fn run(opts: &ExportOptions) -> Result<(), String> {
             jstr(&b.agent),
             jstr(&b.model),
             jstr(b.kind),
-            jstr(&clean(&b.cmd)),
+            jstr(&clean_cmd(&b.cmd)),
         ));
     }
     out.push_str("  ],\n");
@@ -160,9 +208,9 @@ pub fn run(opts: &ExportOptions) -> Result<(), String> {
             lp.ts,
             jstr(&lp.agent),
             jstr(&lp.model_key),
-            jstr(&lp.cmd),
+            jstr(&clean_cmd(&lp.cmd)),
             jstr(&lp.lang),
-            jstr(&clean(&lp.path)),
+            jstr(&clean_path(&lp.path)),
             lp.total_lines,
             lp.raw_tokens,
         ));
@@ -231,24 +279,6 @@ fn push_audit_rows_json(out: &mut String, rows: &[(String, usize, usize, f64)], 
         ));
     }
     out.push_str(&format!("{pad}]"));
-}
-
-fn jstr(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 /// Redacts `$HOME` prefixes and common inline secret patterns (Bearer tokens, API keys,
@@ -353,7 +383,9 @@ fn redact_env_assignments(s: &str) -> String {
                         if bytes[i] == q {
                             break;
                         }
-                    } else if bytes[i].is_ascii_whitespace() || matches!(bytes[i], b';' | b'&' | b'|') {
+                    } else if bytes[i].is_ascii_whitespace()
+                        || matches!(bytes[i], b';' | b'&' | b'|')
+                    {
                         break;
                     }
                     i += 1;
@@ -390,6 +422,57 @@ fn is_secret_env_name(name: &str) -> bool {
         || upper == "API_KEY"
 }
 
+fn fnv1a_hex8(s: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{:08x}", (hash >> 32) ^ (hash & 0xffff_ffff))
+}
+
+pub(crate) fn anonymize_path(path: &str) -> String {
+    if path == "<stdin>"
+        || path.starts_with("git:")
+        || path.starts_with("rg:")
+        || path.starts_with("ls:")
+        || path.starts_with("find:")
+        || path.starts_with("pipe:")
+    {
+        return path.to_string();
+    }
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{e}"))
+        .unwrap_or_default();
+    let dir_part = std::path::Path::new(path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or("");
+    let file_hash = fnv1a_hex8(path);
+    if dir_part.is_empty() || dir_part == "." {
+        format!("file_{file_hash}{ext}")
+    } else {
+        let dir_hash = fnv1a_hex8(dir_part);
+        format!("repo_{dir_hash}/file_{file_hash}{ext}")
+    }
+}
+
+pub(crate) fn anonymize_cmd(cmd: &str) -> String {
+    cmd.split_whitespace()
+        .map(|tok| {
+            let trimmed = tok.trim_matches(|c| c == '\'' || c == '"');
+            if trimmed.contains('/') && !trimmed.starts_with("http") && !trimmed.starts_with('-') {
+                anonymize_path(trimmed)
+            } else {
+                tok.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +486,20 @@ mod tests {
         assert!(out.contains("~/app"), "got: {out}");
         assert!(!out.contains("1234567890"), "leaked key: {out}");
         assert!(!out.contains("/Users/alice"), "leaked home: {out}");
+    }
+
+    #[test]
+    fn anonymizes_paths_deterministically_keeping_extensions() {
+        let p = "/Users/alice/secret-project/src/auth.rs";
+        let a1 = anonymize_path(p);
+        let a2 = anonymize_path(p);
+        assert_eq!(a1, a2);
+        assert!(a1.starts_with("repo_"));
+        assert!(a1.ends_with(".rs"));
+        assert!(!a1.contains("secret-project"));
+        assert!(!a1.contains("auth"));
+        assert_eq!(anonymize_path("git:diff"), "git:diff");
+        let cmd = anonymize_cmd("cat /Users/alice/secret/src/auth.rs");
+        assert!(cmd.starts_with("cat repo_") && cmd.ends_with(".rs"));
     }
 }

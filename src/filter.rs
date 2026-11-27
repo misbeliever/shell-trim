@@ -54,7 +54,10 @@ fn dedup_consecutive_lines(items: Vec<FilteredItem>) -> Vec<FilteredItem> {
         {
             let mut j = i + 1;
             while j < items.len() {
-                if let FilteredItem::Line { text: ref next_text, .. } = items[j]
+                if let FilteredItem::Line {
+                    text: ref next_text,
+                    ..
+                } = items[j]
                     && next_text == text
                 {
                     j += 1;
@@ -99,19 +102,18 @@ fn collapse_items(
     let mut omit_end: usize = 0;
     let mut prev_was_blank = false;
 
-    let flush_omit = |out: &mut Vec<FilteredItem>,
-                      omit_start: &mut Option<usize>,
-                      omit_end: usize| {
-        if let Some(start) = omit_start.take() {
-            let count = omit_end.saturating_sub(start) + 1;
-            if count >= 3 {
-                out.push(FilteredItem::Omitted {
-                    start,
-                    end: omit_end,
-                });
+    let flush_omit =
+        |out: &mut Vec<FilteredItem>, omit_start: &mut Option<usize>, omit_end: usize| {
+            if let Some(start) = omit_start.take() {
+                let count = omit_end.saturating_sub(start) + 1;
+                if count >= 3 {
+                    out.push(FilteredItem::Omitted {
+                        start,
+                        end: omit_end,
+                    });
+                }
             }
-        }
-    };
+        };
 
     for (num, maybe_text) in rows {
         match maybe_text {
@@ -188,7 +190,25 @@ fn is_regex_preceding_char(ch: Option<char>) -> bool {
         None => true,
         Some(c) => matches!(
             c,
-            '(' | '[' | '{' | ',' | '=' | ':' | ';' | '!' | '&' | '|' | '?' | '+' | '-' | '*' | '%' | '^' | '~' | '<' | '>' | '\n'
+            '(' | '['
+                | '{'
+                | ','
+                | '='
+                | ':'
+                | ';'
+                | '!'
+                | '&'
+                | '|'
+                | '?'
+                | '+'
+                | '-'
+                | '*'
+                | '%'
+                | '^'
+                | '~'
+                | '<'
+                | '>'
+                | '\n'
         ),
     }
 }
@@ -221,7 +241,10 @@ fn strip_slash_comments(
 
         while i < len {
             if let Some(hashes) = raw_hashes {
-                if bytes[i] == b'"' && i + hashes < len && bytes[i + 1..=i + hashes].iter().all(|&b| b == b'#') {
+                if bytes[i] == b'"'
+                    && i + hashes < len
+                    && bytes[i + 1..=i + hashes].iter().all(|&b| b == b'#')
+                {
                     out.push('"');
                     for _ in 0..hashes {
                         out.push('#');
@@ -364,7 +387,8 @@ fn strip_slash_comments(
                 let mut j = i;
                 let mut has_r = false;
                 if bytes[j] == b'r' {
-                    let prev_ident = i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+                    let prev_ident =
+                        i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
                     if !prev_ident {
                         has_r = true;
                         j += 1;
@@ -426,8 +450,7 @@ fn strip_slash_comments(
 
             // Block comment `/*`
             if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                let is_empty_block =
-                    i + 3 < len && bytes[i + 2] == b'*' && bytes[i + 3] == b'/';
+                let is_empty_block = i + 3 < len && bytes[i + 2] == b'*' && bytes[i + 3] == b'/';
                 let is_doc = !is_empty_block
                     && i + 2 < len
                     && (bytes[i + 2] == b'*' || bytes[i + 2] == b'!');
@@ -773,12 +796,22 @@ mod tests {
         ];
         let items = filter_lines(&lines, 1, Language::TypeScript, FilterStrength::Minimal);
         let text = kept_lines(&items).join("\n");
-        assert!(text.contains("const re = /https?:\\/\\/[a-z/]+/g;"), "got: {text}");
+        assert!(
+            text.contains("const re = /https?:\\/\\/[a-z/]+/g;"),
+            "got: {text}"
+        );
         assert!(!text.contains("strip me"), "got: {text}");
         assert!(text.contains("const ratio = a / b;"), "got: {text}");
         assert!(!text.contains("division comment"), "got: {text}");
-        assert!(text.contains("http://example.com/${a} // not a comment"), "got: {text}");
-        assert!(items.iter().any(|it| matches!(it, FilteredItem::Omitted { start: 4, end: 6 })));
+        assert!(
+            text.contains("http://example.com/${a} // not a comment"),
+            "got: {text}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|it| matches!(it, FilteredItem::Omitted { start: 4, end: 6 }))
+        );
     }
 
     #[test]

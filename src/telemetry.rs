@@ -122,7 +122,23 @@ pub struct StatsSnapshot {
     pub recent_events: Vec<(u64, String, String, String, usize, usize)>, // ts, agent, cmd, path, raw_tok, out_tok
 }
 
-pub fn load_snapshot(since_secs: Option<u64>) -> StatsSnapshot {
+enum StatsLoad {
+    EmptyLog,
+    EmptyFiltered,
+    Ready {
+        events: Vec<Event>,
+        snap: Box<StatsSnapshot>,
+        raw_bytes: usize,
+        out_bytes: usize,
+    },
+}
+
+fn compute_stats(
+    since_secs: Option<u64>,
+    agent_filter: Option<&str>,
+    model_filter: Option<&str>,
+    reread_window_secs: u64,
+) -> StatsLoad {
     flush_fallback_into_primary();
     let lp = primary_log_path();
     let fb = fallback_log_path();
@@ -139,7 +155,7 @@ pub fn load_snapshot(since_secs: Option<u64>) -> StatsSnapshot {
         raw.push_str(&s);
     }
     if raw.trim().is_empty() {
-        return StatsSnapshot::default();
+        return StatsLoad::EmptyLog;
     }
 
     let now = now_secs();
@@ -150,14 +166,25 @@ pub fn load_snapshot(since_secs: Option<u64>) -> StatsSnapshot {
         .filter(|e| cutoff.is_none_or(|c| e.ts >= c))
         .collect();
     enrich_models_from_sessions(&mut events);
+    events.retain(|e| {
+        agent_filter.is_none_or(|af| e.agent.to_lowercase() == af)
+            && model_filter.is_none_or(|mf| e.model_key().to_lowercase().contains(mf))
+    });
+    if events.is_empty() {
+        return StatsLoad::EmptyFiltered;
+    }
     events.sort_by_key(|e| e.ts);
 
+    let mut total_raw_bytes = 0usize;
+    let mut total_out_bytes = 0usize;
     let mut snap = StatsSnapshot {
         events_count: events.len(),
         ..StatsSnapshot::default()
     };
 
     for e in &events {
+        total_raw_bytes += e.raw_bytes;
+        total_out_bytes += e.out_bytes;
         snap.raw_tokens += e.raw_tokens;
         snap.out_tokens += e.out_tokens;
         let dmode = e.display_mode().to_string();
@@ -185,17 +212,22 @@ pub fn load_snapshot(since_secs: Option<u64>) -> StatsSnapshot {
             });
         }
     }
-    snap.large_passthroughs
-        .sort_by(|a, b| b.raw_tokens.cmp(&a.raw_tokens).then_with(|| b.ts.cmp(&a.ts)));
+    snap.large_passthroughs.sort_by(|a, b| {
+        b.ts.cmp(&a.ts)
+            .then_with(|| b.raw_tokens.cmp(&a.raw_tokens))
+    });
 
-    let window = crate::config::Config::load().reread_window_secs;
     for (i, e) in events.iter().enumerate() {
-        if e.eff_mode == "raw" || e.eff_mode == "all" || e.eff_mode == "symbol" || e.path == "<stdin>" {
+        if e.eff_mode == "raw"
+            || e.eff_mode == "all"
+            || e.eff_mode == "symbol"
+            || e.path == "<stdin>"
+        {
             continue;
         }
         for next in &events[i + 1..] {
             let delta = next.ts.saturating_sub(e.ts);
-            if delta > window {
+            if delta > reread_window_secs {
                 break;
             }
             if next.cmd != e.cmd || next.path != e.path || !same_actor(e, next) {
@@ -208,7 +240,9 @@ pub fn load_snapshot(since_secs: Option<u64>) -> StatsSnapshot {
                     snap.wasted_tokens += e.out_tokens;
                     for b in [
                         snap.by_cmd.entry(e.cmd.clone()).or_default(),
-                        snap.by_mode.entry(e.display_mode().to_string()).or_default(),
+                        snap.by_mode
+                            .entry(e.display_mode().to_string())
+                            .or_default(),
                         snap.by_agent.entry(e.agent.clone()).or_default(),
                         snap.by_model.entry(e.model_key()).or_default(),
                         snap.by_lang.entry(e.lang.clone()).or_default(),
@@ -264,7 +298,9 @@ pub fn load_snapshot(since_secs: Option<u64>) -> StatsSnapshot {
                 snap.wasted_tokens += e.out_tokens;
                 for b in [
                     snap.by_cmd.entry(e.cmd.clone()).or_default(),
-                    snap.by_mode.entry(e.display_mode().to_string()).or_default(),
+                    snap.by_mode
+                        .entry(e.display_mode().to_string())
+                        .or_default(),
                     snap.by_agent.entry(e.agent.clone()).or_default(),
                     snap.by_model.entry(e.model_key()).or_default(),
                     snap.by_lang.entry(e.lang.clone()).or_default(),
@@ -308,7 +344,9 @@ pub fn load_snapshot(since_secs: Option<u64>) -> StatsSnapshot {
     for (i, e) in events.iter().enumerate() {
         if e.cmd == "rg" && e.eff_mode == "block" {
             let followed_by_read = events[i + 1..].iter().any(|n| {
-                n.ts.saturating_sub(e.ts) <= window && n.cmd == "read" && same_actor(e, n)
+                n.ts.saturating_sub(e.ts) <= reread_window_secs
+                    && n.cmd == "read"
+                    && same_actor(e, n)
             });
             if !followed_by_read {
                 snap.turns_saved += 1;
@@ -350,21 +388,43 @@ pub fn load_snapshot(since_secs: Option<u64>) -> StatsSnapshot {
             )
         })
         .collect();
-    snap
+
+    StatsLoad::Ready {
+        events,
+        snap: Box::new(snap),
+        raw_bytes: total_raw_bytes,
+        out_bytes: total_out_bytes,
+    }
+}
+
+pub fn load_snapshot(since_secs: Option<u64>) -> StatsSnapshot {
+    let window = crate::config::Config::load().reread_window_secs;
+    match compute_stats(since_secs, None, None, window) {
+        StatsLoad::Ready { snap, .. } => *snap,
+        _ => StatsSnapshot::default(),
+    }
 }
 
 fn non_empty_env(key: &str) -> Option<String> {
-    env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn detect_agent() -> String {
     if let Some(a) = non_empty_env("TRM_AGENT") {
-        return a.to_lowercase();
+        let lower = a.to_lowercase();
+        return if lower == "antigravity" {
+            "agy".into()
+        } else {
+            lower
+        };
     }
     if non_empty_env("ANTIGRAVITY_AGENT").is_some()
         || non_empty_env("ANTIGRAVITY_CONVERSATION_ID").is_some()
     {
-        return "antigravity".into();
+        return "agy".into();
     }
     if non_empty_env("CODEX_THREAD_ID").is_some()
         || non_empty_env("CODEX_SANDBOX").is_some()
@@ -460,9 +520,18 @@ fn detect_provider_and_model() -> (String, String) {
 
 fn infer_provider(model: &str) -> String {
     let low = model.to_lowercase();
-    if low.contains("claude") || low.contains("sonnet") || low.contains("opus") || low.contains("haiku") {
+    if low.contains("claude")
+        || low.contains("sonnet")
+        || low.contains("opus")
+        || low.contains("haiku")
+    {
         "anthropic".into()
-    } else if low.starts_with("gpt") || low.starts_with("o1") || low.starts_with("o3") || low.starts_with("o4") || low.contains("codex") {
+    } else if low.starts_with("gpt")
+        || low.starts_with("o1")
+        || low.starts_with("o3")
+        || low.starts_with("o4")
+        || low.contains("codex")
+    {
         "openai".into()
     } else if low.contains("gemini") {
         "google".into()
@@ -511,18 +580,13 @@ fn append_line(path: &PathBuf, line: &str) -> bool {
 
 /// If sandboxed agents wrote to `/tmp/trm-events-<user>.jsonl`, flush those lines
 /// into the persistent primary log whenever the primary log is writable.
+/// Uses an atomic `rename` to claim the fallback file so concurrent readers
+/// (e.g. `trm ui` + another command) can never flush the same events twice.
 fn flush_fallback_into_primary() {
     let Some(fb) = fallback_log_path() else {
         return;
     };
     if !fb.exists() {
-        return;
-    }
-    let Ok(content) = fs::read_to_string(&fb) else {
-        return;
-    };
-    if content.trim().is_empty() {
-        let _ = fs::remove_file(&fb);
         return;
     }
     let primary = primary_log_path();
@@ -531,11 +595,22 @@ fn flush_fallback_into_primary() {
     {
         return;
     }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&primary)
-        && file.write_all(content.as_bytes()).is_ok()
-    {
-        let _ = fs::remove_file(&fb);
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&primary) else {
+        return;
+    };
+    let claimed = fb.with_extension(format!("jsonl.{}.flushing", std::process::id()));
+    if fs::rename(&fb, &claimed).is_err() {
+        return;
     }
+    if let Ok(content) = fs::read_to_string(&claimed)
+        && !content.trim().is_empty()
+        && file.write_all(content.as_bytes()).is_err()
+    {
+        // Best-effort restore if write failed after claim
+        let _ = fs::rename(&claimed, &fb);
+        return;
+    }
+    let _ = fs::remove_file(&claimed);
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -545,8 +620,23 @@ pub(crate) fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn estimate_tokens(bytes: usize) -> usize {
-    bytes.div_ceil(4)
+/// Empirical bytes-per-token factor scaled by 10 for integer fixed-point math.
+pub fn bytes_per_token_x10(lang: &str) -> usize {
+    match lang {
+        "json" => 32,
+        "yaml" | "toml" | "sql" => 35,
+        "git" | "search" | "fs" | "cargo" | "swiftc" => 37,
+        "swift" | "rust" | "ts" | "js" | "go" | "c-like" | "python" | "shell" => 38,
+        "markdown" | "text" => 42,
+        _ => 40,
+    }
+}
+
+pub fn estimate_tokens_for_lang(bytes: usize, lang: &str) -> usize {
+    if bytes == 0 {
+        return 0;
+    }
+    (bytes * 10).div_ceil(bytes_per_token_x10(lang))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -576,8 +666,8 @@ pub fn log_read_event(
         total_lines,
         raw_bytes,
         out_bytes,
-        raw_tokens: estimate_tokens(raw_bytes),
-        out_tokens: estimate_tokens(out_bytes),
+        raw_tokens: estimate_tokens_for_lang(raw_bytes, lang),
+        out_tokens: estimate_tokens_for_lang(out_bytes, lang),
     };
 
     let line = serialize_event(&ev);
@@ -597,7 +687,16 @@ pub fn log_search_event(
     raw_bytes: usize,
     out_bytes: usize,
 ) {
-    log_cmd_event("rg", query_key, "search", req_mode, eff_mode, total_lines, raw_bytes, out_bytes);
+    log_cmd_event(
+        "rg",
+        query_key,
+        "search",
+        req_mode,
+        eff_mode,
+        total_lines,
+        raw_bytes,
+        out_bytes,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -627,8 +726,8 @@ pub fn log_cmd_event(
         total_lines,
         raw_bytes,
         out_bytes,
-        raw_tokens: estimate_tokens(raw_bytes),
-        out_tokens: estimate_tokens(out_bytes),
+        raw_tokens: estimate_tokens_for_lang(raw_bytes, lang),
+        out_tokens: estimate_tokens_for_lang(out_bytes, lang),
     };
 
     let line = serialize_event(&ev);
@@ -667,204 +766,54 @@ pub fn run_stats(opts: &StatsOptions) -> Result<(), String> {
         return Ok(());
     }
 
-    flush_fallback_into_primary();
-
-    let mut raw = String::new();
-    if lp.exists()
-        && let Ok(s) = fs::read_to_string(&lp)
-    {
-        raw.push_str(&s);
-    }
-    if let Some(ref f) = fb
-        && f.exists()
-        && let Ok(s) = fs::read_to_string(f)
-    {
-        raw.push_str(&s);
-    }
-
-    if raw.trim().is_empty() {
-        if opts.json {
-            println!("{{\"events\":0,\"gross_saved_tokens\":0,\"net_saved_tokens\":0}}");
-        } else {
-            println!("No telemetry recorded yet ({}).", lp.display());
-            println!("Run 'trm read <file>' to start tracking savings.");
+    let (events, snap, total_raw_bytes, total_out_bytes) = match compute_stats(
+        opts.since_secs,
+        opts.agent_filter.as_deref(),
+        opts.model_filter.as_deref(),
+        opts.reread_window_secs,
+    ) {
+        StatsLoad::EmptyLog => {
+            if opts.json {
+                println!("{{\"events\":0,\"gross_saved_tokens\":0,\"net_saved_tokens\":0}}");
+            } else {
+                println!("No telemetry recorded yet ({}).", lp.display());
+                println!("Run 'trm read <file>' to start tracking savings.");
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
+        StatsLoad::EmptyFiltered => {
+            if opts.json {
+                println!("{{\"events\":0,\"gross_saved_tokens\":0,\"net_saved_tokens\":0}}");
+            } else {
+                println!("No events in selected window/filter.");
+            }
+            return Ok(());
+        }
+        StatsLoad::Ready {
+            events,
+            snap,
+            raw_bytes,
+            out_bytes,
+        } => (events, snap, raw_bytes, out_bytes),
+    };
 
     let now = now_secs();
-    let cutoff = opts.since_secs.map(|d| now.saturating_sub(d));
-
-    let mut events: Vec<Event> = raw
-        .lines()
-        .filter_map(parse_event)
-        .filter(|e| cutoff.is_none_or(|c| e.ts >= c))
-        .collect();
-
-    // Backfill unknown provider/model from agent session transcripts using session ID
-    enrich_models_from_sessions(&mut events);
-
-    events.retain(|e| {
-        opts.agent_filter
-            .as_ref()
-            .is_none_or(|af| e.agent.to_lowercase() == *af)
-            && opts
-                .model_filter
-                .as_ref()
-                .is_none_or(|mf| e.model_key().to_lowercase().contains(mf))
-    });
-    events.sort_by_key(|e| e.ts);
-
-    if events.is_empty() {
-        if opts.json {
-            println!("{{\"events\":0,\"gross_saved_tokens\":0,\"net_saved_tokens\":0}}");
-        } else {
-            println!("No events in selected window/filter.");
-        }
-        return Ok(());
-    }
-
-    let mut total_raw_bytes: usize = 0;
-    let mut total_out_bytes: usize = 0;
-    let mut total_raw_tokens: usize = 0;
-    let mut total_out_tokens: usize = 0;
-
-    let mut by_cmd: BTreeMap<String, Bucket> = BTreeMap::new();
-    let mut by_mode: BTreeMap<String, Bucket> = BTreeMap::new();
-    let mut by_agent: BTreeMap<String, Bucket> = BTreeMap::new();
-    let mut by_model: BTreeMap<String, Bucket> = BTreeMap::new();
-    let mut by_lang: BTreeMap<String, Bucket> = BTreeMap::new();
-
-    for e in &events {
-        total_raw_bytes += e.raw_bytes;
-        total_out_bytes += e.out_bytes;
-        total_raw_tokens += e.raw_tokens;
-        total_out_tokens += e.out_tokens;
-
-        for b in [
-            by_cmd.entry(e.cmd.clone()).or_default(),
-            by_mode.entry(e.display_mode().to_string()).or_default(),
-            by_agent.entry(e.agent.clone()).or_default(),
-            by_model.entry(e.model_key()).or_default(),
-            by_lang.entry(e.lang.clone()).or_default(),
-        ] {
-            b.reads += 1;
-            b.raw_tokens += e.raw_tokens;
-            b.out_tokens += e.out_tokens;
-        }
-    }
-
-    // Per-agent (and per-session) re-read / escalation analysis
-    let mut misses: Vec<TrimMiss> = Vec::new();
-    let mut drilldowns: usize = 0;
-
-    for (i, e) in events.iter().enumerate() {
-        if e.eff_mode == "raw" || e.eff_mode == "all" || e.eff_mode == "symbol" || e.path == "<stdin>" {
-            continue;
-        }
-        for next in &events[i + 1..] {
-            let delta = next.ts.saturating_sub(e.ts);
-            if delta > opts.reread_window_secs {
-                break;
-            }
-            if next.cmd != e.cmd || next.path != e.path || !same_actor(e, next) {
-                continue;
-            }
-            if e.cmd != "read" {
-                // Only count explicit --all / --raw retries as misses (not auto never-expand fallbacks)
-                if next.req_mode == "all" || next.req_mode == "raw" {
-                    let model_key = e.model_key();
-                    for b in [
-                        by_cmd.entry(e.cmd.clone()).or_default(),
-                        by_agent.entry(e.agent.clone()).or_default(),
-                        by_model.entry(model_key.clone()).or_default(),
-                        by_mode.entry(e.eff_mode.clone()).or_default(),
-                        by_lang.entry(e.lang.clone()).or_default(),
-                    ] {
-                        b.misses += 1;
-                        b.wasted_tokens += e.out_tokens;
-                    }
-                    misses.push(TrimMiss {
-                        ts: e.ts,
-                        cmd: e.cmd.clone(),
-                        path: e.path.clone(),
-                        agent: e.agent.clone(),
-                        model_key,
-                        first_mode: e.eff_mode.clone(),
-                        followup_mode: next.req_mode.clone(),
-                        followup_range: Some(next.req_mode.clone()),
-                        total_lines: e.total_lines,
-                        delta_secs: delta,
-                        wasted_tokens: e.out_tokens,
-                    });
-                    break;
-                }
-                continue;
-            }
-            if next.eff_mode != "raw" {
-                continue;
-            }
-            let coverage = range_coverage(next.range.as_deref(), e.total_lines);
-            if e.eff_mode == "outline" && coverage < 0.85 {
-                drilldowns += 1;
-                by_cmd.entry(e.cmd.clone()).or_default().drilldowns += 1;
-                by_agent.entry(e.agent.clone()).or_default().drilldowns += 1;
-                by_model.entry(e.model_key()).or_default().drilldowns += 1;
-                by_mode.entry(e.eff_mode.clone()).or_default().drilldowns += 1;
-                break;
-            }
-            if next.range.is_none() || coverage >= 0.85 {
-                let model_key = e.model_key();
-                for b in [
-                    by_cmd.entry(e.cmd.clone()).or_default(),
-                    by_agent.entry(e.agent.clone()).or_default(),
-                    by_model.entry(model_key.clone()).or_default(),
-                    by_mode.entry(e.eff_mode.clone()).or_default(),
-                    by_lang.entry(e.lang.clone()).or_default(),
-                ] {
-                    b.misses += 1;
-                    b.wasted_tokens += e.out_tokens;
-                }
-                misses.push(TrimMiss {
-                    ts: e.ts,
-                    cmd: e.cmd.clone(),
-                    path: e.path.clone(),
-                    agent: e.agent.clone(),
-                    model_key,
-                    first_mode: e.eff_mode.clone(),
-                    followup_mode: "raw".to_string(),
-                    followup_range: next.range.clone(),
-                    total_lines: e.total_lines,
-                    delta_secs: delta,
-                    wasted_tokens: e.out_tokens,
-                });
-                break;
-            }
-        }
-    }
-
-    let gross_saved: isize = total_raw_tokens as isize - total_out_tokens as isize;
-    let wasted_tokens: usize = misses.iter().map(|m| m.wasted_tokens).sum();
-    let net_saved: isize = gross_saved - wasted_tokens as isize;
-
-    let gross_pct = pct(gross_saved, total_raw_tokens);
-    let net_pct = pct(net_saved, total_raw_tokens);
 
     if opts.json {
         println!(
             "{{\"events\":{},\"raw_bytes\":{},\"out_bytes\":{},\"raw_tokens\":{},\"out_tokens\":{},\"gross_saved_tokens\":{},\"gross_saved_pct\":{:.1},\"trim_misses\":{},\"wasted_tokens\":{},\"outline_drilldowns\":{},\"net_saved_tokens\":{},\"net_saved_pct\":{:.1}}}",
-            events.len(),
+            snap.events_count,
             total_raw_bytes,
             total_out_bytes,
-            total_raw_tokens,
-            total_out_tokens,
-            gross_saved,
-            gross_pct,
-            misses.len(),
-            wasted_tokens,
-            drilldowns,
-            net_saved,
-            net_pct
+            snap.raw_tokens,
+            snap.out_tokens,
+            snap.gross_saved,
+            snap.gross_pct,
+            snap.misses_count,
+            snap.wasted_tokens,
+            snap.drilldowns,
+            snap.net_saved,
+            snap.net_pct
         );
         return Ok(());
     }
@@ -872,31 +821,31 @@ pub fn run_stats(opts: &StatsOptions) -> Result<(), String> {
     let theme = Theme::detect();
     println!(
         "{}",
-        theme.header_rule("trm stats", &format!("{} commands", events.len()))
+        theme.header_rule("trm stats", &format!("{} commands", snap.events_count))
     );
     println!(
         "  {:<16} {:>9} tokens  {}",
         theme.dim("Raw input:"),
-        fmt_num(total_raw_tokens),
-        theme.dim(&format!("({})", fmt_bytes(total_raw_bytes)))
+        fmt_num(snap.raw_tokens),
+        theme.dim(&format!("({})", crate::style::fmt_bytes(total_raw_bytes)))
     );
     println!(
         "  {:<16} {:>9} tokens  {}",
         theme.dim("Trimmed output:"),
-        fmt_num(total_out_tokens),
-        theme.dim(&format!("({})", fmt_bytes(total_out_bytes)))
+        fmt_num(snap.out_tokens),
+        theme.dim(&format!("({})", crate::style::fmt_bytes(total_out_bytes)))
     );
     println!(
         "  {:<16} {:>9} tokens  {}  {}",
         theme.dim("Gross saved:"),
-        fmt_signed(gross_saved),
-        theme.pct_color(gross_pct, &format!("{gross_pct:>5.1}%")),
-        theme.bar(gross_pct, 12)
+        fmt_signed(snap.gross_saved),
+        theme.pct_color(snap.gross_pct, &format!("{:>5.1}%", snap.gross_pct)),
+        theme.bar(snap.gross_pct, 12)
     );
-    let waste_str = if wasted_tokens > 0 {
-        theme.red(&fmt_num(wasted_tokens))
+    let waste_str = if snap.wasted_tokens > 0 {
+        theme.red(&fmt_num(snap.wasted_tokens))
     } else {
-        fmt_num(wasted_tokens)
+        fmt_num(snap.wasted_tokens)
     };
     println!(
         "  {:<16} {:>9} tokens  {}",
@@ -904,35 +853,34 @@ pub fn run_stats(opts: &StatsOptions) -> Result<(), String> {
         waste_str,
         theme.dim(&format!(
             "({} trim misses, {} outline drill-downs)",
-            misses.len(),
-            drilldowns
+            snap.misses_count, snap.drilldowns
         ))
     );
     println!(
         "  {:<16} {:>9} tokens  {}  {}",
         theme.bold("Net saved:"),
-        theme.bold(&fmt_signed(net_saved)),
-        theme.pct_color(net_pct, &format!("{net_pct:>5.1}%")),
-        theme.bar(net_pct, 12)
+        theme.bold(&fmt_signed(snap.net_saved)),
+        theme.pct_color(snap.net_pct, &format!("{:>5.1}%", snap.net_pct)),
+        theme.bar(snap.net_pct, 12)
     );
 
-    if by_cmd.len() > 1 {
-        print_bucket_table(&theme, "By command", "cmd", &by_cmd);
+    if snap.by_cmd.len() > 1 {
+        print_bucket_table(&theme, "By command", "cmd", &snap.by_cmd);
     }
 
-    print_bucket_table(&theme, "By mode", "mode", &by_mode);
+    print_bucket_table(&theme, "By mode", "mode", &snap.by_mode);
 
-    if opts.by_agent || by_agent.len() > 1 {
-        print_bucket_table(&theme, "By agent", "agent", &by_agent);
+    if opts.by_agent || snap.by_agent.len() > 1 {
+        print_bucket_table(&theme, "By agent", "agent", &snap.by_agent);
     }
 
-    let has_known_model = by_model.keys().any(|k| k != "unknown");
+    let has_known_model = snap.by_model.keys().any(|k| k != "unknown");
     if opts.by_model || has_known_model {
-        print_bucket_table(&theme, "By model", "provider/model", &by_model);
+        print_bucket_table(&theme, "By model", "provider/model", &snap.by_model);
     }
 
     if opts.by_lang {
-        print_bucket_table(&theme, "By language", "lang", &by_lang);
+        print_bucket_table(&theme, "By language", "lang", &snap.by_lang);
     }
 
     if opts.misses {
@@ -940,10 +888,10 @@ pub fn run_stats(opts: &StatsOptions) -> Result<(), String> {
             "\nTrim misses (same agent/session re-read raw within {}s):",
             opts.reread_window_secs
         );
-        if misses.is_empty() {
+        if snap.misses.is_empty() {
             println!("  None detected.");
         } else {
-            for m in misses.iter().rev().take(20) {
+            for m in snap.misses.iter().rev().take(20) {
                 let rng = m.followup_range.as_deref().unwrap_or("full");
                 let who = if m.model_key != "unknown" {
                     format!("{} ({})", m.agent, m.model_key)
@@ -965,27 +913,33 @@ pub fn run_stats(opts: &StatsOptions) -> Result<(), String> {
     }
 
     if opts.recommend {
-        print_recommendations(&events, &misses, &by_agent, &by_model);
+        let hints = collect_recommendations(&events, &snap.misses, &snap.by_agent, &snap.by_model);
+        println!("\nRecommendations:");
+        if events.len() < 10 {
+            println!(
+                "  (low sample size: {} commands — collect 20+ commands for reliable tuning)",
+                events.len()
+            );
+        }
+        if hints.is_empty() {
+            println!("  All metrics look healthy — no threshold adjustments needed.");
+        } else {
+            for h in hints {
+                println!("  - {h}");
+            }
+        }
     }
 
     Ok(())
 }
 
-fn print_recommendations(
+fn collect_recommendations(
     events: &[Event],
     misses: &[TrimMiss],
     by_agent: &BTreeMap<String, Bucket>,
     by_model: &BTreeMap<String, Bucket>,
-) {
-    println!("\nRecommendations:");
+) -> Vec<String> {
     let mut hints: Vec<String> = Vec::new();
-
-    if events.len() < 10 {
-        println!(
-            "  (low sample size: {} commands — collect 20+ commands for reliable tuning)",
-            events.len()
-        );
-    }
 
     // 1. Agent-level high miss rate
     for (agent, b) in by_agent {
@@ -1100,22 +1054,71 @@ fn print_recommendations(
         ));
     }
 
-    if hints.is_empty() {
-        println!("  All metrics look healthy — no threshold adjustments needed.");
-    } else {
-        for h in hints {
-            println!("  - {h}");
+    // 7. Per-language high miss rate tuning
+    let mut lang_reads: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut path_lang: BTreeMap<&str, &str> = BTreeMap::new();
+    for e in events {
+        if e.cmd == "read" {
+            path_lang.insert(e.path.as_str(), e.lang.as_str());
+            if e.eff_mode != "raw" && e.eff_mode != "pass" && e.eff_mode != "slice" {
+                *lang_reads.entry(e.lang.as_str()).or_insert(0) += 1;
+            }
         }
     }
+    let mut lang_misses: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for m in misses {
+        if m.cmd == "read"
+            && let Some(&lang) = path_lang.get(m.path.as_str())
+        {
+            let entry = lang_misses.entry(lang).or_default();
+            entry.0 += 1;
+            entry.1 += m.wasted_tokens;
+        }
+    }
+    for (lang, reads) in lang_reads {
+        if reads >= 5
+            && let Some(&(mcnt, wasted)) = lang_misses.get(lang)
+            && mcnt > 0
+        {
+            let rate = (mcnt as f64 / reads as f64) * 100.0;
+            if rate >= 20.0 {
+                hints.push(format!(
+                    "Language '{lang}' has a {rate:.0}% miss rate ({mcnt}/{reads} trimmed reads, -{} wasted tok) — raise `outline_lines` or inspect `trm stats --by-lang --misses`.",
+                    fmt_num(wasted)
+                ));
+            }
+        }
+    }
+
+    // 8. `rg --block` effectiveness check
+    let rg_block_total = events
+        .iter()
+        .filter(|e| e.cmd == "rg" && e.eff_mode == "block")
+        .count();
+    let rg_block_misses = misses
+        .iter()
+        .filter(|m| m.cmd == "rg" && m.first_mode == "block")
+        .count();
+    if rg_block_total >= 5 {
+        let block_rate = (rg_block_misses as f64 / rg_block_total as f64) * 100.0;
+        if block_rate >= 25.0 {
+            hints.push(format!(
+                "`rg --block` triggered follow-up raw reads on {rg_block_misses}/{rg_block_total} ({block_rate:.0}%) searches — try `--no-block` or `-C`."
+            ));
+        } else if block_rate < 10.0 {
+            hints.push(format!(
+                "`rg --block` is working cleanly ({rg_block_total} expansions, {block_rate:.0}% follow-up rate)."
+            ));
+        }
+    }
+
+    hints
 }
 
 type SessionModelTimeline = Vec<(u64, String, String)>;
 
 fn enrich_models_from_sessions(events: &mut [Event]) {
-    let home = env::var("TRM_HOME")
-        .or_else(|_| env::var("HOME"))
-        .unwrap_or_else(|_| ".".into());
-    let home_path = PathBuf::from(home);
+    let home_path = crate::config::Config::home_dir();
     let mut cache: BTreeMap<(String, String), SessionModelTimeline> = BTreeMap::new();
 
     for e in events.iter_mut() {
@@ -1158,7 +1161,7 @@ fn resolve_session_model_timeline(
     session_id: &str,
 ) -> Vec<(u64, String, String)> {
     let candidate: Option<PathBuf> = match agent {
-        "antigravity" => {
+        "agy" | "antigravity" => {
             let p = home
                 .join(".gemini")
                 .join("antigravity-cli")
@@ -1237,9 +1240,7 @@ fn extract_model_timeline(path: &std::path::Path) -> Vec<(u64, String, String)> 
         {
             let (prov, model) = if let Some((p, rest)) = m.split_once('/') {
                 (
-                    current_provider
-                        .clone()
-                        .unwrap_or_else(|| p.to_lowercase()),
+                    current_provider.clone().unwrap_or_else(|| p.to_lowercase()),
                     rest.to_string(),
                 )
             } else {
@@ -1274,16 +1275,11 @@ fn find_json_str_value(line: &str, key_quoted: &str) -> Option<String> {
     while i < bytes.len() && bytes[i].is_ascii_whitespace() {
         i += 1;
     }
-    let (val, _) = parse_json_str(line, i)?;
+    let (val, _) = crate::json::JsonParser::parse_string_at(line, i)?;
     Some(val)
 }
 
-fn print_bucket_table(
-    theme: &Theme,
-    title: &str,
-    col_name: &str,
-    map: &BTreeMap<String, Bucket>,
-) {
+fn print_bucket_table(theme: &Theme, title: &str, col_name: &str, map: &BTreeMap<String, Bucket>) {
     println!("\n{}", theme.bold(&format!("{title}:")));
     let mut rows_sorted: Vec<(&String, &Bucket)> = map.iter().collect();
     rows_sorted.sort_by_key(|a| std::cmp::Reverse(a.1.raw_tokens));
@@ -1394,55 +1390,28 @@ fn fmt_signed(n: isize) -> String {
     }
 }
 
-fn fmt_bytes(b: usize) -> String {
-    if b >= 1_048_576 {
-        format!("{:.1} MB", b as f64 / 1_048_576.0)
-    } else if b >= 1024 {
-        format!("{:.1} KB", b as f64 / 1024.0)
-    } else {
-        format!("{b} B")
-    }
-}
-
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 fn serialize_event(e: &Event) -> String {
+    let jstr = crate::json::json_string;
     let range_json = match &e.range {
-        Some(r) => json_escape(r),
+        Some(r) => jstr(r),
         None => "null".to_string(),
     };
     let session_json = match &e.session {
-        Some(s) => json_escape(s),
+        Some(s) => jstr(s),
         None => "null".to_string(),
     };
     format!(
         "{{\"ts\":{},\"cmd\":{},\"agent\":{},\"session\":{},\"provider\":{},\"model\":{},\"path\":{},\"lang\":{},\"req_mode\":{},\"eff_mode\":{},\"range\":{},\"total_lines\":{},\"raw_bytes\":{},\"out_bytes\":{},\"raw_tokens\":{},\"out_tokens\":{}}}",
         e.ts,
-        json_escape(&e.cmd),
-        json_escape(&e.agent),
+        jstr(&e.cmd),
+        jstr(&e.agent),
         session_json,
-        json_escape(&e.provider),
-        json_escape(&e.model),
-        json_escape(&e.path),
-        json_escape(&e.lang),
-        json_escape(&e.req_mode),
-        json_escape(&e.eff_mode),
+        jstr(&e.provider),
+        jstr(&e.model),
+        jstr(&e.path),
+        jstr(&e.lang),
+        jstr(&e.req_mode),
+        jstr(&e.eff_mode),
         range_json,
         e.total_lines,
         e.raw_bytes,
@@ -1453,137 +1422,133 @@ fn serialize_event(e: &Event) -> String {
 }
 
 fn parse_event(line: &str) -> Option<Event> {
-    let s = line.trim();
-    if !s.starts_with('{') || !s.ends_with('}') {
-        return None;
-    }
-    let map = parse_flat_json_obj(&s[1..s.len() - 1])?;
+    use crate::json::{JsonParser, JsonValue};
+    let obj = JsonParser::parse(line.trim()).ok()?;
     Some(Event {
-        ts: map.get("ts")?.parse().ok()?,
-        cmd: map.get("cmd")?.clone(),
-        agent: map
+        ts: obj.get("ts").and_then(JsonValue::as_u64)?,
+        cmd: obj.get("cmd").and_then(JsonValue::as_str)?.to_string(),
+        agent: match obj
             .get("agent")
-            .cloned()
-            .unwrap_or_else(|| "unknown".into()),
-        session: map.get("session").and_then(|v| {
-            if v == "null" {
-                None
-            } else {
-                Some(v.clone())
-            }
-        }),
-        provider: map
+            .and_then(JsonValue::as_str)
+            .unwrap_or("unknown")
+        {
+            "antigravity" => "agy".to_string(),
+            other => other.to_string(),
+        },
+        session: obj
+            .get("session")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+        provider: obj
             .get("provider")
-            .cloned()
-            .unwrap_or_else(|| "unknown".into()),
-        model: map
+            .and_then(JsonValue::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        model: obj
             .get("model")
-            .cloned()
-            .unwrap_or_else(|| "unknown".into()),
-        path: map.get("path")?.clone(),
-        lang: map.get("lang")?.clone(),
-        req_mode: map.get("req_mode")?.clone(),
-        eff_mode: map.get("eff_mode")?.clone(),
-        range: map.get("range").and_then(|v| {
-            if v == "null" {
-                None
-            } else {
-                Some(v.clone())
-            }
-        }),
-        total_lines: map.get("total_lines")?.parse().ok()?,
-        raw_bytes: map.get("raw_bytes")?.parse().ok()?,
-        out_bytes: map.get("out_bytes")?.parse().ok()?,
-        raw_tokens: map.get("raw_tokens")?.parse().ok()?,
-        out_tokens: map.get("out_tokens")?.parse().ok()?,
+            .and_then(JsonValue::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        path: obj.get("path").and_then(JsonValue::as_str)?.to_string(),
+        lang: obj.get("lang").and_then(JsonValue::as_str)?.to_string(),
+        req_mode: obj.get("req_mode").and_then(JsonValue::as_str)?.to_string(),
+        eff_mode: obj.get("eff_mode").and_then(JsonValue::as_str)?.to_string(),
+        range: obj
+            .get("range")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string),
+        total_lines: obj.get("total_lines").and_then(JsonValue::as_u64)? as usize,
+        raw_bytes: obj.get("raw_bytes").and_then(JsonValue::as_u64)? as usize,
+        out_bytes: obj.get("out_bytes").and_then(JsonValue::as_u64)? as usize,
+        raw_tokens: obj.get("raw_tokens").and_then(JsonValue::as_u64)? as usize,
+        out_tokens: obj.get("out_tokens").and_then(JsonValue::as_u64)? as usize,
     })
 }
 
-fn parse_flat_json_obj(s: &str) -> Option<BTreeMap<String, String>> {
-    let mut map = BTreeMap::new();
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    while i < len {
-        while i < len && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
-            i += 1;
-        }
-        if i >= len {
-            break;
-        }
-        let (key, next_i) = parse_json_str(s, i)?;
-        i = next_i;
-        while i < len && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= len || bytes[i] != b':' {
-            return None;
-        }
-        i += 1;
-        while i < len && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= len {
-            return None;
-        }
-        let val = if bytes[i] == b'"' {
-            let (v, ni) = parse_json_str(s, i)?;
-            i = ni;
-            v
-        } else {
-            let start = i;
-            while i < len && bytes[i] != b',' && !bytes[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            s[start..i].to_string()
-        };
-        map.insert(key, val);
+    #[test]
+    fn per_language_token_estimation_scales_as_expected() {
+        assert_eq!(estimate_tokens_for_lang(0, "json"), 0);
+        assert_eq!(estimate_tokens_for_lang(0, "markdown"), 0);
+
+        let bytes = 3_800;
+        let json_tok = estimate_tokens_for_lang(bytes, "json");
+        let rust_tok = estimate_tokens_for_lang(bytes, "rust");
+        let md_tok = estimate_tokens_for_lang(bytes, "markdown");
+        assert!(json_tok > rust_tok, "json={json_tok} rust={rust_tok}");
+        assert!(rust_tok > md_tok, "rust={rust_tok} md={md_tok}");
+        assert_eq!(rust_tok, 1_000);
     }
 
-    Some(map)
-}
-
-fn parse_json_str(s: &str, start: usize) -> Option<(String, usize)> {
-    let bytes = s.as_bytes();
-    if bytes.get(start) != Some(&b'"') {
-        return None;
-    }
-    let mut i = start + 1;
-    let mut out = String::new();
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == b'"' {
-            return Some((out, i + 1));
+    #[test]
+    fn recommendations_flag_high_miss_rate_language_and_rg_block() {
+        let mut events = Vec::new();
+        for i in 0..5 {
+            events.push(Event {
+                ts: 100 + i,
+                cmd: "read".into(),
+                agent: "codex".into(),
+                session: None,
+                provider: "openai".into(),
+                model: "gpt-5".into(),
+                path: format!("/tmp/f{i}.swift"),
+                lang: "swift".into(),
+                req_mode: "auto".into(),
+                eff_mode: "outline".into(),
+                range: None,
+                total_lines: 400,
+                raw_bytes: 8000,
+                out_bytes: 800,
+                raw_tokens: 2000,
+                out_tokens: 200,
+            });
+            events.push(Event {
+                ts: 200 + i,
+                cmd: "rg".into(),
+                agent: "codex".into(),
+                session: None,
+                provider: "openai".into(),
+                model: "gpt-5".into(),
+                path: format!("q{i}"),
+                lang: "search".into(),
+                req_mode: "auto".into(),
+                eff_mode: "block".into(),
+                range: None,
+                total_lines: 20,
+                raw_bytes: 1000,
+                out_bytes: 300,
+                raw_tokens: 250,
+                out_tokens: 75,
+            });
         }
-        if b == b'\\' {
-            i += 1;
-            if i >= bytes.len() {
-                return None;
-            }
-            match bytes[i] {
-                b'"' => out.push('"'),
-                b'\\' => out.push('\\'),
-                b'n' => out.push('\n'),
-                b'r' => out.push('\r'),
-                b't' => out.push('\t'),
-                b'u' if i + 4 < bytes.len() => {
-                    let hex = &s[i + 1..i + 5];
-                    if let Ok(code) = u32::from_str_radix(hex, 16)
-                        && let Some(ch) = char::from_u32(code)
-                    {
-                        out.push(ch);
-                    }
-                    i += 4;
-                }
-                other => out.push(other as char),
-            }
-            i += 1;
-            continue;
-        }
-        let ch = s[i..].chars().next()?;
-        out.push(ch);
-        i += ch.len_utf8();
+        let misses = vec![TrimMiss {
+            ts: 101,
+            cmd: "read".into(),
+            path: "/tmp/f0.swift".into(),
+            agent: "codex".into(),
+            model_key: "openai/gpt-5".into(),
+            first_mode: "outline".into(),
+            followup_mode: "raw".into(),
+            followup_range: None,
+            total_lines: 400,
+            delta_secs: 10,
+            wasted_tokens: 200,
+        }];
+        let hints = collect_recommendations(&events, &misses, &BTreeMap::new(), &BTreeMap::new());
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("Language 'swift' has a 20% miss rate")),
+            "got: {hints:?}"
+        );
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("`rg --block` is working cleanly")),
+            "got: {hints:?}"
+        );
     }
-    None
 }

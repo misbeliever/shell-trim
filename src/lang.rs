@@ -97,12 +97,11 @@ impl Language {
     pub fn comment_style(&self) -> CommentStyle {
         match self {
             Language::Swift | Language::Rust => CommentStyle::Slash { nested_block: true },
-            Language::TypeScript
-            | Language::JavaScript
-            | Language::Go
-            | Language::CLike => CommentStyle::Slash {
-                nested_block: false,
-            },
+            Language::TypeScript | Language::JavaScript | Language::Go | Language::CLike => {
+                CommentStyle::Slash {
+                    nested_block: false,
+                }
+            }
             Language::Python => CommentStyle::Hash {
                 python_docstrings: true,
             },

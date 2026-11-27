@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use crate::cli::AuditOptions;
 use crate::style::{self, Cell, Theme};
@@ -111,10 +111,17 @@ pub struct AuditSummary {
     pub recent_bypasses: Vec<String>,
 }
 
-pub fn load_summary(since_secs: Option<u64>) -> AuditSummary {
-    let home = env::var("HOME").unwrap_or_else(|_| ".".into());
-    let home_path = PathBuf::from(&home);
-    let now = now_secs();
+type ScanSessionsResult = (
+    BTreeMap<String, AuditBucket>,
+    BTreeMap<String, AuditBucket>,
+    Vec<BypassSample>,
+    usize,
+    u64,
+);
+
+fn scan_sessions(since_secs: Option<u64>, agent_filter: Option<&str>) -> ScanSessionsResult {
+    let home_path = crate::config::Config::home_dir();
+    let now = crate::telemetry::now_secs();
     let cutoff = since_secs.map(|d| now.saturating_sub(d));
 
     let mut by_agent: BTreeMap<String, AuditBucket> = BTreeMap::new();
@@ -122,14 +129,23 @@ pub fn load_summary(since_secs: Option<u64>) -> AuditSummary {
     let mut samples: Vec<BypassSample> = Vec::new();
     let mut files_scanned = 0usize;
 
-    if let Ok(custom) = env::var("TRM_AUDIT_DIR")
-        && let Some((agent, dir)) = custom.split_once(':')
-    {
-        let mut files = Vec::new();
-        collect_jsonl_files(Path::new(dir), cutoff, &mut files);
-        for f in files {
-            files_scanned += 1;
-            scan_file(agent, &f, cutoff, &mut by_agent, &mut by_model, &mut samples);
+    let want_agent = |name: &str| -> bool { agent_filter.is_none_or(|f| f == name) };
+
+    if let Ok(custom) = env::var("TRM_AUDIT_DIR") {
+        if let Some((agent, dir)) = custom.split_once(':') {
+            let mut files = Vec::new();
+            collect_jsonl_files(Path::new(dir), cutoff, &mut files);
+            for f in files {
+                files_scanned += 1;
+                scan_file(
+                    agent,
+                    &f,
+                    cutoff,
+                    &mut by_agent,
+                    &mut by_model,
+                    &mut samples,
+                );
+            }
         }
     } else {
         let dirs: &[(&str, PathBuf)] = &[
@@ -139,30 +155,55 @@ pub fn load_summary(since_secs: Option<u64>) -> AuditSummary {
             ("pi", home_path.join(".pi").join("agent").join("sessions")),
         ];
         for (agent, dir) in dirs {
-            if dir.exists() {
+            if want_agent(agent) && dir.exists() {
                 let mut files = Vec::new();
                 collect_jsonl_files(dir, cutoff, &mut files);
                 for f in files {
                     files_scanned += 1;
-                    scan_file(agent, &f, cutoff, &mut by_agent, &mut by_model, &mut samples);
+                    scan_file(
+                        agent,
+                        &f,
+                        cutoff,
+                        &mut by_agent,
+                        &mut by_model,
+                        &mut samples,
+                    );
                 }
             }
         }
-        let brain_dir = home_path.join(".gemini").join("antigravity-cli").join("brain");
-        if let Ok(entries) = fs::read_dir(&brain_dir) {
-            for entry in entries.flatten() {
-                let transcript = entry
-                    .path()
-                    .join(".system_generated")
-                    .join("logs")
-                    .join("transcript.jsonl");
-                if transcript.exists() && file_passes_cutoff(&transcript, cutoff) {
-                    files_scanned += 1;
-                    scan_file("antigravity", &transcript, cutoff, &mut by_agent, &mut by_model, &mut samples);
+        if want_agent("agy") {
+            let brain_dir = home_path
+                .join(".gemini")
+                .join("antigravity-cli")
+                .join("brain");
+            if let Ok(entries) = fs::read_dir(&brain_dir) {
+                for entry in entries.flatten() {
+                    let transcript = entry
+                        .path()
+                        .join(".system_generated")
+                        .join("logs")
+                        .join("transcript.jsonl");
+                    if transcript.exists() && file_passes_cutoff(&transcript, cutoff) {
+                        files_scanned += 1;
+                        scan_file(
+                            "agy",
+                            &transcript,
+                            cutoff,
+                            &mut by_agent,
+                            &mut by_model,
+                            &mut samples,
+                        );
+                    }
                 }
             }
         }
     }
+
+    (by_agent, by_model, samples, files_scanned, now)
+}
+
+pub fn load_summary(since_secs: Option<u64>) -> AuditSummary {
+    let (by_agent, by_model, mut samples, files_scanned, now) = scan_sessions(since_secs, None);
 
     let mut adopted = 0usize;
     let mut bypasses = 0usize;
@@ -197,10 +238,9 @@ pub fn load_summary(since_secs: Option<u64>) -> AuditSummary {
         .rev()
         .take(100)
         .map(|s| {
-            let age = s
-                .ts
-                .map(|t| format!("{:>7} ", crate::telemetry::fmt_age(t, now)))
-                .unwrap_or_default();
+            let age =
+                s.ts.map(|t| format!("{:>7} ", crate::telemetry::fmt_age(t, now)))
+                    .unwrap_or_default();
             format!("{age}[{}/{}] ({}) {}", s.agent, s.model, s.kind, s.cmd)
         })
         .collect();
@@ -218,113 +258,11 @@ pub fn load_summary(since_secs: Option<u64>) -> AuditSummary {
 }
 
 pub fn run_audit(opts: &AuditOptions) -> Result<(), String> {
-    let home = env::var("HOME").unwrap_or_else(|_| ".".into());
-    let home_path = PathBuf::from(&home);
-    let now = now_secs();
-    let cutoff = opts.since_secs.map(|d| now.saturating_sub(d));
-
-    let mut by_agent: BTreeMap<String, AuditBucket> = BTreeMap::new();
-    let mut by_model: BTreeMap<String, AuditBucket> = BTreeMap::new();
-    let mut samples: Vec<BypassSample> = Vec::new();
-    let mut files_scanned: usize = 0;
-
-    let want_agent = |name: &str| -> bool {
-        opts.agent_filter
-            .as_ref()
-            .is_none_or(|f| f == name)
-    };
-
-    // Custom test/override dir if set via TRM_AUDIT_DIR (format: "<agent>:<dir>")
-    if let Ok(custom) = env::var("TRM_AUDIT_DIR") {
-        if let Some((agent, dir)) = custom.split_once(':') {
-            let mut files = Vec::new();
-            collect_jsonl_files(Path::new(dir), cutoff, &mut files);
-            for f in files {
-                files_scanned += 1;
-                scan_file(agent, &f, cutoff, &mut by_agent, &mut by_model, &mut samples);
-            }
-        }
-    } else {
-        // 1. Codex: ~/.codex/sessions/**/*.jsonl
-        if want_agent("codex") {
-            let codex_dir = home_path.join(".codex").join("sessions");
-            if codex_dir.exists() {
-                let mut files = Vec::new();
-                collect_jsonl_files(&codex_dir, cutoff, &mut files);
-                for f in files {
-                    files_scanned += 1;
-                    scan_file("codex", &f, cutoff, &mut by_agent, &mut by_model, &mut samples);
-                }
-            }
-        }
-
-        // 2. Antigravity: ~/.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl
-        if want_agent("antigravity") {
-            let brain_dir = home_path
-                .join(".gemini")
-                .join("antigravity-cli")
-                .join("brain");
-            if let Ok(entries) = fs::read_dir(&brain_dir) {
-                for entry in entries.flatten() {
-                    let transcript = entry
-                        .path()
-                        .join(".system_generated")
-                        .join("logs")
-                        .join("transcript.jsonl");
-                    if transcript.exists() && file_passes_cutoff(&transcript, cutoff) {
-                        files_scanned += 1;
-                        scan_file(
-                            "antigravity",
-                            &transcript,
-                            cutoff,
-                            &mut by_agent,
-                            &mut by_model,
-                            &mut samples,
-                        );
-                    }
-                }
-            }
-        }
-
-        // 3. Claude Code: ~/.claude/projects/**/*.jsonl
-        if want_agent("claude") {
-            let claude_dir = home_path.join(".claude").join("projects");
-            if claude_dir.exists() {
-                let mut files = Vec::new();
-                collect_jsonl_files(&claude_dir, cutoff, &mut files);
-                for f in files {
-                    files_scanned += 1;
-                    scan_file("claude", &f, cutoff, &mut by_agent, &mut by_model, &mut samples);
-                }
-            }
-        }
-
-        // 4. GitHub Copilot CLI: ~/.copilot/session-state/**/*.jsonl
-        if want_agent("copilot") {
-            let copilot_dir = home_path.join(".copilot").join("session-state");
-            if copilot_dir.exists() {
-                let mut files = Vec::new();
-                collect_jsonl_files(&copilot_dir, cutoff, &mut files);
-                for f in files {
-                    files_scanned += 1;
-                    scan_file("copilot", &f, cutoff, &mut by_agent, &mut by_model, &mut samples);
-                }
-            }
-        }
-
-        // 5. Pi coding agent: ~/.pi/agent/sessions/**/*.jsonl
-        if want_agent("pi") {
-            let pi_dir = home_path.join(".pi").join("agent").join("sessions");
-            if pi_dir.exists() {
-                let mut files = Vec::new();
-                collect_jsonl_files(&pi_dir, cutoff, &mut files);
-                for f in files {
-                    files_scanned += 1;
-                    scan_file("pi", &f, cutoff, &mut by_agent, &mut by_model, &mut samples);
-                }
-            }
-        }
+    if opts.context {
+        return crate::context_audit::run(opts);
     }
+    let (by_agent, by_model, mut samples, files_scanned, now) =
+        scan_sessions(opts.since_secs, opts.agent_filter.as_deref());
 
     let mut total = AuditBucket::default();
     for b in by_agent.values() {
@@ -430,7 +368,9 @@ pub fn run_audit(opts: &AuditOptions) -> Result<(), String> {
         print_audit_table(&theme, "By agent", "agent", &by_agent);
     }
 
-    let has_known_model = by_model.keys().any(|k| !k.ends_with("/unknown") && k != "unknown");
+    let has_known_model = by_model
+        .keys()
+        .any(|k| !k.ends_with("/unknown") && k != "unknown");
     if opts.by_model || (has_known_model && by_model.len() > 1) {
         print_audit_table(&theme, "By agent/model", "agent/model", &by_model);
     }
@@ -451,11 +391,13 @@ pub fn run_audit(opts: &AuditOptions) -> Result<(), String> {
                 } else {
                     s.cmd.clone()
                 };
-                let age = s
-                    .ts
-                    .map(|t| format!("{:>7} ", crate::telemetry::fmt_age(t, now)))
-                    .unwrap_or_default();
-                println!("  - {age}[{}/{}] ({}) {}", s.agent, s.model, s.kind, preview);
+                let age =
+                    s.ts.map(|t| format!("{:>7} ", crate::telemetry::fmt_age(t, now)))
+                        .unwrap_or_default();
+                println!(
+                    "  - {age}[{}/{}] ({}) {}",
+                    s.agent, s.model, s.kind, preview
+                );
             }
         }
     }
@@ -470,10 +412,8 @@ fn print_audit_table(
     map: &BTreeMap<String, AuditBucket>,
 ) {
     println!("\n{}", theme.bold(&format!("{title}:")));
-    let mut rows_sorted: Vec<(&String, &AuditBucket)> = map
-        .iter()
-        .filter(|(_, b)| b.total() > 0)
-        .collect();
+    let mut rows_sorted: Vec<(&String, &AuditBucket)> =
+        map.iter().filter(|(_, b)| b.total() > 0).collect();
     rows_sorted.sort_by_key(|a| std::cmp::Reverse(a.1.total()));
     if rows_sorted.is_empty() {
         println!("  (no tracked commands)");
@@ -603,7 +543,7 @@ fn scan_file(
         }
 
         let cmds = match agent {
-            "antigravity" => extract_antigravity_cmds(line),
+            "agy" | "antigravity" => extract_antigravity_cmds(line),
             "codex" => extract_codex_cmds(line),
             "claude" => extract_claude_cmds(line),
             "copilot" => extract_copilot_cmds(line),
@@ -640,7 +580,14 @@ fn scan_file(
                     ReadCmdKind::SedRead => {
                         ab.sed_read += 1;
                         mb.sed_read += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "sed -n", sub_cmd);
+                        record_sample(
+                            samples,
+                            current_ts,
+                            agent,
+                            &current_model,
+                            "sed -n",
+                            sub_cmd,
+                        );
                     }
                     ReadCmdKind::TrmRg => {
                         ab.trm_rg += 1;
@@ -963,9 +910,8 @@ fn classify_single_command(cmd: &str) -> Option<ReadCmdKind> {
         },
         "swiftc" => Some(ReadCmdKind::Swift),
         "cargo" => match rest.first().copied() {
-            Some("build") | Some("test") | Some("check") | Some("clippy") | Some("b") | Some("c") => {
-                Some(ReadCmdKind::Cargo)
-            }
+            Some("build") | Some("test") | Some("check") | Some("clippy") | Some("b")
+            | Some("c") => Some(ReadCmdKind::Cargo),
             _ => None,
         },
         "rg" => Some(ReadCmdKind::Rg),
@@ -978,7 +924,10 @@ fn classify_single_command(cmd: &str) -> Option<ReadCmdKind> {
         }
         "cat" => {
             // Ignore heredoc / redirection writes like `cat <<EOF > file`
-            if rest.iter().any(|t| t.starts_with("<<") || *t == ">" || *t == ">>") {
+            if rest
+                .iter()
+                .any(|t| t.starts_with("<<") || *t == ">" || *t == ">>")
+            {
                 return None;
             }
             // Must have at least one non-flag file argument
@@ -1004,7 +953,9 @@ fn classify_single_command(cmd: &str) -> Option<ReadCmdKind> {
         }
         "sed" => {
             // Only count `sed -n ...` file reading (not `sed -i` edits)
-            let has_n = rest.iter().any(|t| *t == "-n" || *t == "--quiet" || *t == "--silent");
+            let has_n = rest
+                .iter()
+                .any(|t| *t == "-n" || *t == "--quiet" || *t == "--silent");
             let has_i = rest.iter().any(|t| t.starts_with("-i"));
             if has_n && !has_i && rest.len() >= 3 {
                 Some(ReadCmdKind::SedRead)
@@ -1215,13 +1166,6 @@ fn parse_quoted_str(s: &str, start: usize, quote: u8) -> Option<(String, usize)>
         i += ch.len_utf8();
     }
     None
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Parse ISO-8601 UTC timestamp like `2026-11-26T11:15:30Z` or `2026-11-26T11:15:30.123Z`.

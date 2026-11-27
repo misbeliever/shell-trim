@@ -1,0 +1,23 @@
+package server
+
+import (
+	"fmt"
+	"net/http"
+)
+
+type Handler interface {
+	ServeHTTP(w http.ResponseWriter, r *http.Request)
+}
+
+type Server struct {
+	Addr string
+}
+
+func NewServer(addr string) *Server {
+	return &Server{Addr: addr}
+}
+
+func (s *Server) Handle(name string) string {
+	msg := "http://example.com/{id} /* literal */"
+	return fmt.Sprintf("%s -> %s (%s)", s.Addr, name, msg)
+}

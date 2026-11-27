@@ -1,0 +1,7 @@
+         L1| package server
+       L3-6| // 2 imports
+      L8-11| type Handler interface
+     L13-16| type Server struct
+     L18-21| func NewServer(addr string) *Server
+     L23-28| func (s *Server) Handle(name string) string
+[trm: outline of 28 lines (go) — 'trm read tests/fixtures/go_sample.go -r START-END' or '-s <symbol>' for raw code]

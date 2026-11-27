@@ -1,0 +1,15 @@
+       L1-2| // 2 imports (Foundation, SwiftUI)
+         L9| // MARK: - Protocol
+     L11-15| protocol SessionProviding
+     L13-14|   func send(_ request: String) async throws -> Data
+        L17| // MARK: - Actor
+     L19-31| actor TokenStore
+     L23-26|   func store(_ value: String, for key: String)
+     L28-30|   func token(for key: String) -> String?
+        L33| // MARK: - Main View
+     L35-52| struct DashboardView: View
+     L40-47|   var body: some View
+     L49-51|   private func reload()
+     L54-58| extension DashboardView
+     L55-57|   func summary() -> String
+[trm: outline of 58 lines (swift) — 'trm read tests/fixtures/swift_sample.swift -r START-END' or '-s <symbol>' for raw code]

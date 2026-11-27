@@ -172,7 +172,14 @@ fn range_slicing_and_auto_mode_thresholds() {
 
     // Explicit range -> raw (keeps comments & exact content; -L adds line numbers)
     let range_out = Command::new(trm_bin())
-        .args(["read", file.to_str().unwrap(), "-r", "4-10", "-L", "--no-stats"])
+        .args([
+            "read",
+            file.to_str().unwrap(),
+            "-r",
+            "4-10",
+            "-L",
+            "--no-stats",
+        ])
         .output()
         .unwrap();
     assert!(range_out.status.success());
@@ -300,7 +307,10 @@ fn telemetry_scopes_misses_per_agent_and_model() {
         .output()
         .unwrap();
     let j1 = String::from_utf8(stats_no_miss.stdout).unwrap();
-    assert!(j1.contains("\"trim_misses\":0"), "cross-agent false miss: {j1}");
+    assert!(
+        j1.contains("\"trim_misses\":0"),
+        "cross-agent false miss: {j1}"
+    );
 
     // Now Codex itself re-reads raw -> SHOULD count as 1 miss for Codex only
     let _ = Command::new(trm_bin())
@@ -352,8 +362,14 @@ fn audit_counts_adoption_and_ignores_pipes_heredocs_and_sed_edits() {
     assert!(json.contains("\"trm_read\":1"), "got: {json}");
     assert!(json.contains("\"cat\":1"), "got: {json}");
     assert!(json.contains("\"sed_read\":1"), "got: {json}");
-    assert!(json.contains("\"head\":0"), "piped head should not count: {json}");
-    assert!(json.contains("\"rg\":1"), "rg should now be tracked as search bypass: {json}");
+    assert!(
+        json.contains("\"head\":0"),
+        "piped head should not count: {json}"
+    );
+    assert!(
+        json.contains("\"rg\":1"),
+        "rg should now be tracked as search bypass: {json}"
+    );
     assert!(json.contains("\"bypasses\":3"), "got: {json}");
 
     let _ = fs::remove_dir_all(&dir);
@@ -370,7 +386,15 @@ fn head_tail_and_max_chars_work() {
     fs::write(&file, lines.join("\n")).unwrap();
 
     let h = Command::new(trm_bin())
-        .args(["read", file.to_str().unwrap(), "--head", "3", "-c", "30", "--no-stats"])
+        .args([
+            "read",
+            file.to_str().unwrap(),
+            "--head",
+            "3",
+            "-c",
+            "30",
+            "--no-stats",
+        ])
         .output()
         .unwrap();
     assert!(h.status.success());
@@ -450,7 +474,9 @@ fn rg_groups_caps_truncates_and_tracks_misses() {
     for f in 1..=3 {
         let mut content = String::new();
         for l in 1..=12 {
-            content.push_str(&format!("    func needle_{f}_{l}() -> Int {{ return {l} }}\n"));
+            content.push_str(&format!(
+                "    func needle_{f}_{l}() -> Int {{ return {l} }}\n"
+            ));
         }
         content.push_str(&format!("let wide = \"needle {}\"\n", "x".repeat(400)));
         fs::write(dir.join(format!("File{f}.swift")), content).unwrap();
@@ -652,7 +678,10 @@ fn copilot_and_pi_install_uninstall_and_audit() {
     )
     .unwrap();
     let c_audit = Command::new(trm_bin())
-        .env("TRM_AUDIT_DIR", format!("copilot:{}", copilot_logs.display()))
+        .env(
+            "TRM_AUDIT_DIR",
+            format!("copilot:{}", copilot_logs.display()),
+        )
         .args(["audit", "--since", "all", "--json"])
         .output()
         .unwrap();
@@ -691,11 +720,21 @@ fn cargo_test_trimming_works_live_and_preserves_summary() {
         .output()
         .unwrap();
     let _ = fs::remove_dir_all(&target_dir);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8(out.stdout).unwrap();
     assert!(s.contains("test result: ok."), "got: {s}");
-    assert!(!s.contains("Compiling "), "should strip Compiling noise: {s}");
-    assert!(!s.contains("... ok"), "should strip passing test lines: {s}");
+    assert!(
+        !s.contains("Compiling "),
+        "should strip Compiling noise: {s}"
+    );
+    assert!(
+        !s.contains("... ok"),
+        "should strip passing test lines: {s}"
+    );
 }
 
 #[test]
@@ -802,8 +841,14 @@ fn audit_filters_commands_by_per_line_timestamp() {
         .unwrap();
     assert!(out.status.success());
     let j = String::from_utf8(out.stdout).unwrap();
-    assert!(j.contains("\"trm_read\":1"), "expected trm sed counted: {j}");
-    assert!(j.contains("\"cat\":0"), "expected 2020 cat filtered out: {j}");
+    assert!(
+        j.contains("\"trm_read\":1"),
+        "expected trm sed counted: {j}"
+    );
+    assert!(
+        j.contains("\"cat\":0"),
+        "expected 2020 cat filtered out: {j}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -842,7 +887,8 @@ fn ls_find_and_ui_once_work() {
         .unwrap();
     assert!(ui.status.success());
     let ui_s = String::from_utf8(ui.stdout).unwrap();
-    assert!(ui_s.contains("trm |"), "got: {ui_s}");
+    assert!(ui_s.contains("1 Overview"), "got: {ui_s}");
+    assert!(ui_s.contains("5 Context"), "got: {ui_s}");
     assert!(ui_s.contains("Net Saved:"), "got: {ui_s}");
 
     let _ = fs::remove_dir_all(&dir);
@@ -868,7 +914,10 @@ fn rg_auto_expands_focused_matches_to_enclosing_block() {
     assert!(s.contains("[L4-L7] (match L5)"), "got: {s}");
     assert!(s.contains("func computeSpecial() -> Int"), "got: {s}");
     assert!(s.contains("return secret * 2"), "got: {s}");
-    assert!(!s.contains("unrelated"), "should not include sibling fn: {s}");
+    assert!(
+        !s.contains("unrelated"),
+        "should not include sibling fn: {s}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -909,8 +958,14 @@ fn stats_tracks_mid_session_model_switch_by_timestamp() {
         .unwrap();
     assert!(stats.status.success());
     let out = String::from_utf8(stats.stdout).unwrap();
-    assert!(out.contains("openai/gpt-6.1-sol"), "missing first model: {out}");
-    assert!(out.contains("openai/gpt-6-luna"), "missing switched model: {out}");
+    assert!(
+        out.contains("openai/gpt-6.1-sol"),
+        "missing first model: {out}"
+    );
+    assert!(
+        out.contains("openai/gpt-6-luna"),
+        "missing switched model: {out}"
+    );
 
     let _ = fs::remove_dir_all(&fake_home);
 }
@@ -927,7 +982,12 @@ fn raw_strings_and_js_regex_literals_survive_comment_stripping() {
     )
     .unwrap();
     let sw = Command::new(trm_bin())
-        .args(["read", swift_file.to_str().unwrap(), "--minimal", "--no-stats"])
+        .args([
+            "read",
+            swift_file.to_str().unwrap(),
+            "--minimal",
+            "--no-stats",
+        ])
         .output()
         .unwrap();
     let sw_s = String::from_utf8(sw.stdout).unwrap();
@@ -981,7 +1041,9 @@ fn config_toml_doctor_and_cursor_hook_install_work() {
     let swift_file = fake_home.join("Tiny.swift");
     let mut src = String::from("import Foundation\n\nstruct S {\n");
     for i in 0..4 {
-        src.push_str(&format!("    func f{i}() {{\n        let x = {i}\n    }}\n"));
+        src.push_str(&format!(
+            "    func f{i}() {{\n        let x = {i}\n    }}\n"
+        ));
     }
     src.push_str("}\n");
     fs::write(&swift_file, &src).unwrap();
@@ -992,7 +1054,10 @@ fn config_toml_doctor_and_cursor_hook_install_work() {
         .output()
         .unwrap();
     let s = String::from_utf8(out.stdout).unwrap();
-    assert!(s.contains("[trm: outline of"), "config outline_lines=10 should trigger outline: {s}");
+    assert!(
+        s.contains("[trm: outline of"),
+        "config outline_lines=10 should trigger outline: {s}"
+    );
 
     // Install with Cursor + Claude --hook, verify doctor passes, then uninstall
     let inst = Command::new(trm_bin())
@@ -1006,24 +1071,45 @@ fn config_toml_doctor_and_cursor_hook_install_work() {
     assert!(hook.exists());
 
     // Verify hook rewrites `&&` chains safely and skips pipes/redirects/heredocs
+    let bin_dir = std::path::Path::new(trm_bin()).parent().unwrap();
+    let test_path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     let run_hook = |cmd_json: &str| -> String {
         use std::io::Write;
         let mut child = Command::new(&hook)
+            .env("PATH", &test_path)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.as_mut().unwrap().write_all(cmd_json.as_bytes()).unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(cmd_json.as_bytes())
+            .unwrap();
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success());
         String::from_utf8(out.stdout).unwrap()
     };
     let rewritten = run_hook(r#"{"tool_input":{"command":"trm git status && ls -la src/"}}"#);
-    assert!(rewritten.contains("trm git status && trm ls -la src/"), "got: {rewritten}");
+    assert!(
+        rewritten.contains("trm git status && trm ls -la src/"),
+        "got: {rewritten}"
+    );
     let heredoc = run_hook(r#"{"tool_input":{"command":"cat <<EOF > out.txt"}}"#);
-    assert!(heredoc.trim().is_empty(), "heredoc must not be rewritten: {heredoc}");
+    assert!(
+        heredoc.trim().is_empty(),
+        "heredoc must not be rewritten: {heredoc}"
+    );
     let piped = run_hook(r#"{"tool_input":{"command":"rg foo src/ | wc -l"}}"#);
-    assert!(piped.trim().is_empty(), "piped cmd must not be rewritten: {piped}");
+    assert!(
+        piped.trim().is_empty(),
+        "piped cmd must not be rewritten: {piped}"
+    );
 
     let doc = Command::new(trm_bin())
         .env("TRM_HOME", &fake_home)
@@ -1075,24 +1161,45 @@ fn multi_symbol_and_fuzzy_symbol_fallback_work() {
 
     // Multi-symbol `-s startSession,cancelRecording` returns both raw bodies in 1 call
     let multi = Command::new(trm_bin())
-        .args(["read", f.to_str().unwrap(), "-s", "startSession,cancelRecording", "--no-stats"])
+        .args([
+            "read",
+            f.to_str().unwrap(),
+            "-s",
+            "startSession,cancelRecording",
+            "--no-stats",
+        ])
         .output()
         .unwrap();
     assert!(multi.status.success());
     let ms = String::from_utf8(multi.stdout).unwrap();
     assert!(ms.contains("func startSession()"), "got: {ms}");
     assert!(ms.contains("func cancelRecording()"), "got: {ms}");
-    assert!(!ms.contains("finishCurrentRecording"), "should not include unmatched symbol: {ms}");
+    assert!(
+        !ms.contains("finishCurrentRecording"),
+        "should not include unmatched symbol: {ms}"
+    );
 
     // Fuzzy fallback when `-s finishRecording` misses exact name
     let miss = Command::new(trm_bin())
-        .args(["read", f.to_str().unwrap(), "-s", "finishRecording", "--no-stats"])
+        .args([
+            "read",
+            f.to_str().unwrap(),
+            "-s",
+            "finishRecording",
+            "--no-stats",
+        ])
         .output()
         .unwrap();
     assert!(!miss.status.success());
     let err = String::from_utf8(miss.stderr).unwrap();
-    assert!(err.contains("Closest symbols:"), "expected closest suggestions: {err}");
-    assert!(err.contains("finishCurrentRecording"), "expected finishCurrentRecording: {err}");
+    assert!(
+        err.contains("Closest symbols:"),
+        "expected closest suggestions: {err}"
+    );
+    assert!(
+        err.contains("finishCurrentRecording"),
+        "expected finishCurrentRecording: {err}"
+    );
     assert!(err.contains("[L"), "expected line range hint: {err}");
 
     let _ = fs::remove_dir_all(&dir);
@@ -1110,15 +1217,27 @@ fn plain_log_deduplicates_consecutive_identical_lines() {
     fs::write(&log_file, &content).unwrap();
 
     let out = Command::new(trm_bin())
-        .args(["read", log_file.to_str().unwrap(), "--minimal", "--no-stats"])
+        .args([
+            "read",
+            log_file.to_str().unwrap(),
+            "--minimal",
+            "--no-stats",
+        ])
         .output()
         .unwrap();
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
     assert!(s.contains("INFO server started"), "got: {s}");
-    assert!(s.contains("WARN retrying connection to 127.0.0.1:5432  [×15]"), "got: {s}");
+    assert!(
+        s.contains("WARN retrying connection to 127.0.0.1:5432  [×15]"),
+        "got: {s}"
+    );
     assert!(s.contains("INFO connected"), "got: {s}");
-    assert_eq!(s.lines().count(), 3, "expected 3 lines after dedup, got: {s}");
+    assert_eq!(
+        s.lines().count(),
+        3,
+        "expected 3 lines after dedup, got: {s}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1256,8 +1375,14 @@ class Service:
     assert!(sym.status.success());
     let sym_s = String::from_utf8(sym.stdout).unwrap();
     assert!(sym_s.contains("[L3-L9]"), "got: {sym_s}");
-    assert!(sym_s.contains("@functools.lru_cache"), "missing decorator: {sym_s}");
-    assert!(sym_s.contains("@app.route("), "missing multi-line decorator: {sym_s}");
+    assert!(
+        sym_s.contains("@functools.lru_cache"),
+        "missing decorator: {sym_s}"
+    );
+    assert!(
+        sym_s.contains("@app.route("),
+        "missing multi-line decorator: {sym_s}"
+    );
     assert!(sym_s.contains("def top():"), "got: {sym_s}");
 
     let _ = fs::remove_dir_all(&dir);
@@ -1303,7 +1428,10 @@ fn git_diff_trailing_all_and_raw_return_full_diff() {
         .unwrap();
     assert!(capped.status.success());
     let capped_s = String::from_utf8(capped.stdout).unwrap();
-    assert!(capped_s.contains("pass --all or --raw"), "expected cap hint: {capped_s}");
+    assert!(
+        capped_s.contains("pass --all or --raw"),
+        "expected cap hint: {capped_s}"
+    );
     assert!(!capped_s.contains("added_line_150"));
 
     // Following the hint: `trm git diff --all` must NOT return empty output
@@ -1314,7 +1442,10 @@ fn git_diff_trailing_all_and_raw_return_full_diff() {
         .unwrap();
     assert!(all.status.success());
     let all_s = String::from_utf8(all.stdout).unwrap();
-    assert!(all_s.contains("+added_line_150"), "git diff --all missing changes: {all_s}");
+    assert!(
+        all_s.contains("+added_line_150"),
+        "git diff --all missing changes: {all_s}"
+    );
 
     // Following the hint: `trm git diff --raw` must return full unified diff, not git --raw format
     let raw = Command::new(trm_bin())
@@ -1324,8 +1455,14 @@ fn git_diff_trailing_all_and_raw_return_full_diff() {
         .unwrap();
     assert!(raw.status.success());
     let raw_s = String::from_utf8(raw.stdout).unwrap();
-    assert!(raw_s.contains("diff --git"), "git diff --raw should be raw unified diff: {raw_s}");
-    assert!(raw_s.contains("+added_line_150"), "git diff --raw missing changes: {raw_s}");
+    assert!(
+        raw_s.contains("diff --git"),
+        "git diff --raw should be raw unified diff: {raw_s}"
+    );
+    assert!(
+        raw_s.contains("+added_line_150"),
+        "git diff --raw missing changes: {raw_s}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1354,7 +1491,10 @@ export class Foo {
     assert!(sym.status.success());
     let sym_s = String::from_utf8(sym.stdout).unwrap();
     assert!(sym_s.contains("[L1-L9]"), "got: {sym_s}");
-    assert!(sym_s.contains("@Component({"), "missing @Component decorator: {sym_s}");
+    assert!(
+        sym_s.contains("@Component({"),
+        "missing @Component decorator: {sym_s}"
+    );
     assert!(sym_s.contains("export class Foo {"), "got: {sym_s}");
 
     let method = Command::new(trm_bin())
@@ -1364,7 +1504,10 @@ export class Foo {
     assert!(method.status.success());
     let m_s = String::from_utf8(method.stdout).unwrap();
     assert!(m_s.contains("[L5-L8]"), "got: {m_s}");
-    assert!(m_s.contains("@Get('/items')"), "missing method decorator: {m_s}");
+    assert!(
+        m_s.contains("@Get('/items')"),
+        "missing method decorator: {m_s}"
+    );
 
     // Previous decorated field (`@Input() a = 1;` / `@Published var x = 1`) must NOT be pulled into next symbol
     let ts_member = dir.join("d.ts");
@@ -1382,14 +1525,26 @@ export class Panel {
     )
     .unwrap();
     let on_click = Command::new(trm_bin())
-        .args(["read", ts_member.to_str().unwrap(), "-s", "onClick", "--no-stats"])
+        .args([
+            "read",
+            ts_member.to_str().unwrap(),
+            "-s",
+            "onClick",
+            "--no-stats",
+        ])
         .output()
         .unwrap();
     assert!(on_click.status.success());
     let oc_s = String::from_utf8(on_click.stdout).unwrap();
     assert!(oc_s.contains("[L3-L6]"), "got: {oc_s}");
-    assert!(!oc_s.contains("@Input() a = 1"), "pulled previous field: {oc_s}");
-    assert!(oc_s.contains("@HostListener"), "missing own decorator: {oc_s}");
+    assert!(
+        !oc_s.contains("@Input() a = 1"),
+        "pulled previous field: {oc_s}"
+    );
+    assert!(
+        oc_s.contains("@HostListener"),
+        "missing own decorator: {oc_s}"
+    );
 
     let swift_member = dir.join("d.swift");
     fs::write(
@@ -1405,13 +1560,22 @@ final class ViewModel {
     )
     .unwrap();
     let tap = Command::new(trm_bin())
-        .args(["read", swift_member.to_str().unwrap(), "-s", "tap", "--no-stats"])
+        .args([
+            "read",
+            swift_member.to_str().unwrap(),
+            "-s",
+            "tap",
+            "--no-stats",
+        ])
         .output()
         .unwrap();
     assert!(tap.status.success());
     let tap_s = String::from_utf8(tap.stdout).unwrap();
     assert!(tap_s.contains("[L3-L5]"), "got: {tap_s}");
-    assert!(!tap_s.contains("@Published var x"), "pulled previous property: {tap_s}");
+    assert!(
+        !tap_s.contains("@Published var x"),
+        "pulled previous property: {tap_s}"
+    );
     assert!(tap_s.contains("@objc func tap()"), "got: {tap_s}");
 
     let _ = fs::remove_dir_all(&dir);
@@ -1442,9 +1606,18 @@ fn trm_rg_searches_piped_stdin_instead_of_directory() {
     let out = child.wait_with_output().unwrap();
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
-    assert!(s.contains("beta_from_pipe"), "expected piped match, got: {s}");
-    assert!(!s.contains("beta_from_disk"), "should not search folder when stdin is piped: {s}");
-    assert!(!s.contains("<stdin>"), "piped rg should omit <stdin> prefix: {s}");
+    assert!(
+        s.contains("beta_from_pipe"),
+        "expected piped match, got: {s}"
+    );
+    assert!(
+        !s.contains("beta_from_disk"),
+        "should not search folder when stdin is piped: {s}"
+    );
+    assert!(
+        !s.contains("<stdin>"),
+        "piped rg should omit <stdin> prefix: {s}"
+    );
 
     // Multi-match piped input: must omit `<stdin> (N)` header and still cap matches
     let mut multi = Command::new(trm_bin())
@@ -1465,9 +1638,15 @@ fn trm_rg_searches_piped_stdin_instead_of_directory() {
     let multi_out = multi.wait_with_output().unwrap();
     assert!(multi_out.status.success());
     let ms = String::from_utf8(multi_out.stdout).unwrap();
-    assert!(!ms.contains("<stdin>"), "multi-match piped rg leaked <stdin> header: {ms}");
+    assert!(
+        !ms.contains("<stdin>"),
+        "multi-match piped rg leaked <stdin> header: {ms}"
+    );
     assert!(ms.contains("1: hit_1"), "got: {ms}");
-    assert!(ms.contains("+4 more matches"), "expected per-file cap on piped input: {ms}");
+    assert!(
+        ms.contains("+4 more matches"),
+        "expected per-file cap on piped input: {ms}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1544,9 +1723,18 @@ func (t *T) M() int {
     assert!(sum.status.success());
     let sum_s = String::from_utf8(sum.stdout).unwrap();
     assert!(sum_s.contains("[L5-L9]"), "got: {sum_s}");
-    assert!(sum_s.contains("// Sum adds two integers."), "missing Go doc: {sum_s}");
-    assert!(sum_s.contains("// Second doc line."), "missing Go doc line 2: {sum_s}");
-    assert!(!sum_s.contains("Detached package note"), "pulled detached comment: {sum_s}");
+    assert!(
+        sum_s.contains("// Sum adds two integers."),
+        "missing Go doc: {sum_s}"
+    );
+    assert!(
+        sum_s.contains("// Second doc line."),
+        "missing Go doc line 2: {sum_s}"
+    );
+    assert!(
+        !sum_s.contains("Detached package note"),
+        "pulled detached comment: {sum_s}"
+    );
 
     let t_sym = Command::new(trm_bin())
         .args(["read", file.to_str().unwrap(), "-s", "T", "--no-stats"])
@@ -1571,7 +1759,9 @@ fn export_bundles_untruncated_misses_bypasses_and_redacts_secrets() {
     let src_file = dir.join("big.swift");
     let mut src = String::from("import Foundation\n\n");
     for i in 0..30 {
-        src.push_str(&format!("// comment {i}\nfunc f{i}() {{\n    let x = {i}\n}}\n"));
+        src.push_str(&format!(
+            "// comment {i}\nfunc f{i}() {{\n    let x = {i}\n}}\n"
+        ));
     }
     fs::write(&src_file, &src).unwrap();
 
@@ -1628,11 +1818,26 @@ fn export_bundles_untruncated_misses_bypasses_and_redacts_secrets() {
     assert!(json.contains("\"bypasses\": ["), "got: {json}");
     assert!(json.contains("\"large_passthroughs\": ["), "got: {json}");
     assert!(json.contains("\"by_mode\": {"), "got: {json}");
-    assert!(json.contains("\"first_mode\": \"minimal\""), "missing miss details: {json}");
-    assert!(json.contains("not/be/truncated/file.swift"), "bypass command was truncated: {json}");
-    assert!(json.contains("OPENAI_API_KEY=[REDACTED]"), "secret not redacted: {json}");
-    assert!(!json.contains("sk-1234567890abcdef"), "leaked secret: {json}");
-    assert!(json.contains("~/very/long/path"), "home not redacted to ~: {json}");
+    assert!(
+        json.contains("\"first_mode\": \"minimal\""),
+        "missing miss details: {json}"
+    );
+    assert!(
+        json.contains("not/be/truncated/file.swift"),
+        "bypass command was truncated: {json}"
+    );
+    assert!(
+        json.contains("OPENAI_API_KEY=[REDACTED]"),
+        "secret not redacted: {json}"
+    );
+    assert!(
+        !json.contains("sk-1234567890abcdef"),
+        "leaked secret: {json}"
+    );
+    assert!(
+        json.contains("~/very/long/path"),
+        "home not redacted to ~: {json}"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1669,7 +1874,9 @@ fn stats_splits_raw_into_slice_pass_raw_and_export_lists_large_passthroughs() {
     let md_file = dir.join("notes.md");
     let mut md = String::new();
     for i in 0..100 {
-        md.push_str(&format!("Paragraph {i}: some prose line that has enough characters to pass 300 tokens.\n"));
+        md.push_str(&format!(
+            "Paragraph {i}: some prose line that has enough characters to pass 300 tokens.\n"
+        ));
     }
     fs::write(&md_file, &md).unwrap();
     let _ = Command::new(trm_bin())
@@ -1697,8 +1904,419 @@ fn stats_splits_raw_into_slice_pass_raw_and_export_lists_large_passthroughs() {
     assert!(exp_out.status.success());
     let e = String::from_utf8_lossy(&exp_out.stdout);
     assert!(e.contains("\"large_passthroughs_count\": 1"), "got: {e}");
-    assert!(e.contains("notes.md"), "expected notes.md in large_passthroughs: {e}");
-    assert!(!e.contains("\"small.txt\""), "small.txt should not be a large passthrough: {e}");
+    assert!(
+        e.contains("notes.md"),
+        "expected notes.md in large_passthroughs: {e}"
+    );
+    assert!(
+        !e.contains("\"small.txt\""),
+        "small.txt should not be a large passthrough: {e}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn minified_json_triggers_byte_guard_in_auto_and_passes_raw() {
+    let dir = temp_dir("minified_guard");
+    let log = dir.join("events.jsonl");
+    let min_file = dir.join("bundle.min.json");
+    let payload = format!("{{\"items\":[{}]}}", "\"abcdef1234567890\",".repeat(1200));
+    assert!(payload.len() > 12_288);
+    fs::write(&min_file, &payload).unwrap();
+
+    let auto_out = Command::new(trm_bin())
+        .env("TRM_LOG_PATH", &log)
+        .args(["read", min_file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(auto_out.status.success());
+    let auto_str = String::from_utf8(auto_out.stdout).unwrap();
+    assert!(
+        auto_str.contains("[trm: minified/wide file ("),
+        "expected minified footer: {auto_str}"
+    );
+    assert!(auto_str.contains("lines truncated to 300 chars"));
+    assert!(
+        auto_str.len() < 1000,
+        "expected compact output, got {} bytes",
+        auto_str.len()
+    );
+
+    let raw_out = Command::new(trm_bin())
+        .env("TRM_LOG_PATH", &log)
+        .args(["read", min_file.to_str().unwrap(), "--raw"])
+        .output()
+        .unwrap();
+    assert!(raw_out.status.success());
+    assert_eq!(
+        String::from_utf8(raw_out.stdout).unwrap(),
+        format!("{payload}\n")
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn git_show_trims_commit_diff_and_passes_blob_raw() {
+    let dir = temp_dir("git_show");
+    let log = dir.join("events.jsonl");
+
+    let run_git = |args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(&dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    run_git(&["init"]);
+    run_git(&["config", "user.name", "Tester"]);
+    run_git(&["config", "user.email", "tester@example.com"]);
+    fs::write(
+        dir.join("main.rs"),
+        "fn main() {\n    println!(\"v1\");\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("Cargo.lock"), "line1\nline2\nline3\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "init"]);
+
+    fs::write(
+        dir.join("main.rs"),
+        "fn main() {\n    println!(\"v2\");\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("Cargo.lock"), "line1\nchanged\nline3\nchanged2\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "update"]);
+
+    let show_out = Command::new(trm_bin())
+        .current_dir(&dir)
+        .env("TRM_LOG_PATH", &log)
+        .args(["git", "show", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(show_out.status.success());
+    let show_str = String::from_utf8_lossy(&show_out.stdout);
+    assert!(show_str.contains("=== main.rs ==="), "got: {show_str}");
+    assert!(
+        show_str.contains("+    println!(\"v2\");"),
+        "got: {show_str}"
+    );
+    assert!(show_str.contains("Cargo.lock (skipped"), "got: {show_str}");
+    assert!(
+        !show_str.contains("+changed2"),
+        "lockfile diff must be skipped: {show_str}"
+    );
+
+    let blob_out = Command::new(trm_bin())
+        .current_dir(&dir)
+        .env("TRM_LOG_PATH", &log)
+        .args(["git", "show", "HEAD:main.rs"])
+        .output()
+        .unwrap();
+    assert!(blob_out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&blob_out.stdout),
+        "fn main() {\n    println!(\"v2\");\n}\n"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn export_then_inspect_round_trips_report_file() {
+    let dir = temp_dir("export_inspect");
+    let log = dir.join("events.jsonl");
+    let report = dir.join("report.json");
+    let sample = dir.join("demo.rs");
+
+    let mut code = String::new();
+    for i in 0..110 {
+        code.push_str(&format!(
+            "// comment line {i}\npub fn f_{i}() -> usize {{ {i} }}\n"
+        ));
+    }
+    fs::write(&sample, &code).unwrap();
+
+    let read_out = Command::new(trm_bin())
+        .env("TRM_LOG_PATH", &log)
+        .args(["read", sample.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(read_out.status.success());
+
+    let exp_out = Command::new(trm_bin())
+        .env("TRM_LOG_PATH", &log)
+        .args(["export", "--since", "all", "-o", report.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(exp_out.status.success());
+    assert!(report.exists());
+
+    let inspect_out = Command::new(trm_bin())
+        .args(["inspect", report.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(inspect_out.status.success());
+    let inspect_str = String::from_utf8_lossy(&inspect_out.stdout);
+    assert!(
+        inspect_str.contains("trm inspect — report v"),
+        "got: {inspect_str}"
+    );
+    assert!(inspect_str.contains("Events: 1"), "got: {inspect_str}");
+    assert!(inspect_str.contains("By lang"), "got: {inspect_str}");
+    assert!(inspect_str.contains("rust"), "got: {inspect_str}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pipe_summarizes_json_and_collapses_logs() {
+    let dir = temp_dir("pipe_mode");
+    let log = dir.join("events.jsonl");
+
+    // 1. Bare `trm` with piped JSON stdin
+    let items: Vec<String> = (0..60)
+        .map(|i| format!(r#"{{"id":{i},"token":"value_payload_{i}"}}"#))
+        .collect();
+    let json_input = format!("[{}]", items.join(","));
+
+    let mut child = Command::new(trm_bin())
+        .env("TRM_LOG_PATH", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(json_input.as_bytes())
+            .unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("array[60 items]"), "got: {stdout}");
+    assert!(stdout.contains("[trm: json summary"), "got: {stdout}");
+
+    // 2. `trm pipe` on repeated log lines
+    let mut logs = String::new();
+    for i in 0..80 {
+        logs.push_str(&format!("2026-11-27T12:00:{:02} INFO tick\n", i % 60));
+    }
+    logs.push_str("2026-11-27T12:02:00 ERROR fatal failure\n");
+    let mut child2 = Command::new(trm_bin())
+        .env("TRM_LOG_PATH", &log)
+        .args(["pipe"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child2
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(logs.as_bytes())
+            .unwrap();
+    }
+    let out2 = child2.wait_with_output().unwrap();
+    assert!(out2.status.success());
+    let stdout2 = String::from_utf8(out2.stdout).unwrap();
+    assert!(stdout2.contains("(x80)"), "got: {stdout2}");
+    assert!(stdout2.contains("ERROR fatal failure"), "got: {stdout2}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hooks_rewrite_agy_and_claude_and_install_merges_hooks_json() {
+    use std::io::Write;
+
+    let fake_home = temp_dir("hooks_install");
+    let gemini_cfg = fake_home.join(".gemini").join("config");
+    fs::create_dir_all(&gemini_cfg).unwrap();
+    let hooks_file = gemini_cfg.join("hooks.json");
+    fs::write(&hooks_file, "{\n  \"other-hook\": {\"Stop\": []}\n}\n").unwrap();
+
+    let inst = Command::new(trm_bin())
+        .env("TRM_HOME", &fake_home)
+        .args(["install", "--hook", "--only", "antigravity"])
+        .output()
+        .unwrap();
+    assert!(inst.status.success());
+    let merged = fs::read_to_string(&hooks_file).unwrap();
+    assert!(
+        merged.contains("\"other-hook\""),
+        "preserved other hook: {merged}"
+    );
+    assert!(
+        merged.contains("\"trm-rewrite\""),
+        "added trm-rewrite: {merged}"
+    );
+    assert!(
+        merged.contains("trm hook agy"),
+        "wired trm hook agy: {merged}"
+    );
+
+    // Uninstall removes only trm-rewrite
+    let uninst = Command::new(trm_bin())
+        .env("TRM_HOME", &fake_home)
+        .args(["uninstall", "--only", "antigravity"])
+        .output()
+        .unwrap();
+    assert!(uninst.status.success());
+    let after = fs::read_to_string(&hooks_file).unwrap();
+    assert!(
+        after.contains("\"other-hook\""),
+        "still preserves other-hook: {after}"
+    );
+    assert!(
+        !after.contains("\"trm-rewrite\""),
+        "removed trm-rewrite: {after}"
+    );
+
+    // Direct `trm hook agy` execution
+    let mut agy = Command::new(trm_bin())
+        .args(["hook", "agy"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    agy.stdin
+        .as_mut()
+        .unwrap()
+        .write_all(br#"{"toolCall":{"name":"run_command","args":{"CommandLine":"cat README.md"}}}"#)
+        .unwrap();
+    let agy_out = String::from_utf8(agy.wait_with_output().unwrap().stdout).unwrap();
+    assert!(agy_out.contains("trm cat README.md"), "got: {agy_out}");
+
+    // Direct `trm hook claude` execution
+    let mut claude = Command::new(trm_bin())
+        .args(["hook", "claude"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    claude
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(br#"{"tool_input":{"command":"rg foo src/"}}"#)
+        .unwrap();
+    let claude_out = String::from_utf8(claude.wait_with_output().unwrap().stdout).unwrap();
+    assert!(claude_out.contains("trm rg foo src/"), "got: {claude_out}");
+
+    let _ = fs::remove_dir_all(&fake_home);
+}
+
+#[test]
+fn audit_context_offline_and_export_anon() {
+    let dir = temp_dir("context_anon");
+    let log = dir.join("events.jsonl");
+    let claude_dir = dir.join(".claude");
+    let skill_dir = dir.join(".agents").join("skills").join("sample");
+    let gemini_cfg = dir.join(".gemini").join("config");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::create_dir_all(&gemini_cfg).unwrap();
+
+    fs::write(
+        claude_dir.join("CLAUDE.md"),
+        "# Always on instructions\nLine 2\n",
+    )
+    .unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: sample\ndescription: Test skill metadata.\n---\nBody\n",
+    )
+    .unwrap();
+    fs::write(
+        gemini_cfg.join("mcp_config.json"),
+        r#"{"mcpServers":{"demo":{"command":"echo","args":["hi"]}}}"#,
+    )
+    .unwrap();
+
+    let ctx_out = Command::new(trm_bin())
+        .env("TRM_HOME", &dir)
+        .args(["audit", "--context"])
+        .output()
+        .unwrap();
+    assert!(ctx_out.status.success());
+    let ctx_str = String::from_utf8(ctx_out.stdout).unwrap();
+    assert!(ctx_str.contains("trm audit --context"), "got: {ctx_str}");
+    assert!(ctx_str.contains("CLAUDE.md"), "got: {ctx_str}");
+    assert!(ctx_str.contains("sample"), "got: {ctx_str}");
+    assert!(ctx_str.contains("demo"), "got: {ctx_str}");
+
+    // Populate a large passthrough event so export --anon hashes the file path
+    let secret_file = dir.join("secret-repo").join("payroll.md");
+    fs::create_dir_all(secret_file.parent().unwrap()).unwrap();
+    let big_md = "Prose line with enough bytes to exceed 300 tokens in telemetry.\n".repeat(40);
+    fs::write(&secret_file, &big_md).unwrap();
+
+    let r = Command::new(trm_bin())
+        .env("TRM_LOG_PATH", &log)
+        .args(["read", secret_file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(r.status.success());
+
+    let exp = Command::new(trm_bin())
+        .env("TRM_LOG_PATH", &log)
+        .args(["export", "--since", "all", "--anon"])
+        .output()
+        .unwrap();
+    assert!(exp.status.success());
+    let exp_str = String::from_utf8(exp.stdout).unwrap();
+    assert!(exp_str.contains("\"anonymized\": true"), "got: {exp_str}");
+    assert!(!exp_str.contains("payroll"), "leaked filename: {exp_str}");
+    assert!(exp_str.contains(".md\""), "lost extension: {exp_str}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn install_dry_run_leaves_user_config_untouched() {
+    let dir = temp_dir("install_dry_run");
+    let gemini_cfg = dir.join(".gemini").join("config");
+    let claude_dir = dir.join(".claude");
+    fs::create_dir_all(&gemini_cfg).unwrap();
+    fs::create_dir_all(&claude_dir).unwrap();
+
+    let gemini_md = gemini_cfg.join("GEMINI.md");
+    let hooks_json = gemini_cfg.join("hooks.json");
+    let orig_md = "# Existing user rules\n";
+    let orig_hooks = r#"{"hooks":{"PreToolUse":[{"name":"existing"}]}}"#;
+    fs::write(&gemini_md, orig_md).unwrap();
+    fs::write(&hooks_json, orig_hooks).unwrap();
+
+    let out = Command::new(trm_bin())
+        .env("TRM_HOME", &dir)
+        .args(["install", "--hook", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("dry-run: no files were modified"),
+        "got: {stdout}"
+    );
+    assert_eq!(fs::read_to_string(&gemini_md).unwrap(), orig_md);
+    assert_eq!(fs::read_to_string(&hooks_json).unwrap(), orig_hooks);
+    assert!(!claude_dir.join("hooks").join("trm-rewrite.sh").exists());
 
     let _ = fs::remove_dir_all(&dir);
 }

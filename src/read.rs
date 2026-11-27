@@ -37,7 +37,7 @@ fn run_single(path: &str, opts: &ReadOptions) -> Result<(), String> {
     if raw_bytes_vec[..sniff_len].contains(&0) {
         let msg = format!(
             "[trm: binary file ({}) — skipped]\n",
-            format_size(raw_bytes_vec.len())
+            crate::style::fmt_bytes(raw_bytes_vec.len())
         );
         let _ = io::stdout().write_all(msg.as_bytes());
         return Ok(());
@@ -101,9 +101,17 @@ fn run_single(path: &str, opts: &ReadOptions) -> Result<(), String> {
 
     // Decide effective mode (honoring optional ~/.config/trm/config.toml thresholds)
     let cfg = Config::load();
+    let is_minified_auto = opts.mode == ReadMode::Auto
+        && effective_range.is_none()
+        && total_lines <= cfg.small_lines
+        && baseline_bytes >= cfg.minified_bytes;
+
+    let mut eff_mode_label: Option<&'static str> = None;
+    let mut skip_max_chars_in_limits = false;
+
     let mut eff_mode = match opts.mode {
         ReadMode::Auto => {
-            if effective_range.is_some() || total_lines <= cfg.small_lines {
+            if effective_range.is_some() || (total_lines <= cfg.small_lines && !is_minified_auto) {
                 ReadMode::Raw
             } else if total_lines > cfg.outline_lines && lang.supports_outline() {
                 ReadMode::Outline
@@ -114,76 +122,97 @@ fn run_single(path: &str, opts: &ReadOptions) -> Result<(), String> {
         explicit => explicit,
     };
 
-    let mut output_lines: Vec<String> = match eff_mode {
-        ReadMode::Raw => format_raw(slice_lines, slice_start_1based, opts.line_numbers),
-        ReadMode::Minimal => {
-            let clean_slice = strip_cr_lines(slice_lines);
-            let items = filter::filter_lines(
-                &clean_slice,
-                slice_start_1based,
-                lang,
-                FilterStrength::Minimal,
-            );
-            let formatted = format_filtered(&items, opts.line_numbers);
-            let est_bytes: usize = formatted.iter().map(|l| l.len() + 1).sum();
-            if !opts.line_numbers && est_bytes >= baseline_bytes {
-                eff_mode = ReadMode::Raw;
-                format_raw(slice_lines, slice_start_1based, false)
-            } else {
-                formatted
-            }
+    let mut output_lines: Vec<String> = if is_minified_auto {
+        let cap = opts.max_chars.unwrap_or(300);
+        let formatted = format_minified_lines(
+            slice_lines,
+            slice_start_1based,
+            total_lines,
+            baseline_bytes,
+            cap,
+            opts.line_numbers,
+        );
+        let est_bytes: usize = formatted.iter().map(|l| l.len() + 1).sum();
+        if !opts.line_numbers && est_bytes >= baseline_bytes {
+            eff_mode = ReadMode::Raw;
+            format_raw(slice_lines, slice_start_1based, false)
+        } else {
+            eff_mode_label = Some("minified");
+            skip_max_chars_in_limits = true;
+            formatted
         }
-        ReadMode::Aggressive => {
-            let clean_slice = strip_cr_lines(slice_lines);
-            let items = filter::filter_lines(
-                &clean_slice,
-                slice_start_1based,
-                lang,
-                FilterStrength::Aggressive,
-            );
-            let formatted = format_filtered(&items, opts.line_numbers);
-            let est_bytes: usize = formatted.iter().map(|l| l.len() + 1).sum();
-            if !opts.line_numbers && est_bytes >= baseline_bytes {
-                eff_mode = ReadMode::Raw;
-                format_raw(slice_lines, slice_start_1based, false)
-            } else {
-                formatted
-            }
-        }
-        ReadMode::Outline => {
-            let clean_slice = strip_cr_lines(slice_lines);
-            let outlined = outline::extract_outline(&clean_slice, lang);
-            if outlined.len() < 3 && opts.mode == ReadMode::Auto {
-                eff_mode = ReadMode::Minimal;
+    } else {
+        match eff_mode {
+            ReadMode::Raw => format_raw(slice_lines, slice_start_1based, opts.line_numbers),
+            ReadMode::Minimal => {
+                let clean_slice = strip_cr_lines(slice_lines);
                 let items = filter::filter_lines(
                     &clean_slice,
                     slice_start_1based,
                     lang,
                     FilterStrength::Minimal,
                 );
-                format_filtered(&items, opts.line_numbers)
-            } else if outlined.is_empty() {
-                vec![format!(
-                    "[trm: no outline symbols found in {path} ({total_lines} lines) — use --minimal or --raw]"
-                )]
-            } else {
-                let mut v = outlined;
-                v.push(format!(
-                    "[trm: outline of {total_lines} lines ({}) — 'trm read {path} -r START-END' or '-s <symbol>' for raw code]",
-                    lang.name()
-                ));
-                v
+                let formatted = format_filtered(&items, opts.line_numbers);
+                let est_bytes: usize = formatted.iter().map(|l| l.len() + 1).sum();
+                if !opts.line_numbers && est_bytes >= baseline_bytes {
+                    eff_mode = ReadMode::Raw;
+                    format_raw(slice_lines, slice_start_1based, false)
+                } else {
+                    formatted
+                }
             }
+            ReadMode::Aggressive => {
+                let clean_slice = strip_cr_lines(slice_lines);
+                let items = filter::filter_lines(
+                    &clean_slice,
+                    slice_start_1based,
+                    lang,
+                    FilterStrength::Aggressive,
+                );
+                let formatted = format_filtered(&items, opts.line_numbers);
+                let est_bytes: usize = formatted.iter().map(|l| l.len() + 1).sum();
+                if !opts.line_numbers && est_bytes >= baseline_bytes {
+                    eff_mode = ReadMode::Raw;
+                    format_raw(slice_lines, slice_start_1based, false)
+                } else {
+                    formatted
+                }
+            }
+            ReadMode::Outline => {
+                let clean_slice = strip_cr_lines(slice_lines);
+                let outlined = outline::extract_outline(&clean_slice, lang);
+                if outlined.len() < 3 && opts.mode == ReadMode::Auto {
+                    eff_mode = ReadMode::Minimal;
+                    let items = filter::filter_lines(
+                        &clean_slice,
+                        slice_start_1based,
+                        lang,
+                        FilterStrength::Minimal,
+                    );
+                    format_filtered(&items, opts.line_numbers)
+                } else if outlined.is_empty() {
+                    vec![format!(
+                        "[trm: no outline symbols found in {path} ({total_lines} lines) — use --minimal or --raw]"
+                    )]
+                } else {
+                    let mut v = outlined;
+                    v.push(format!(
+                        "[trm: outline of {total_lines} lines ({}) — 'trm read {path} -r START-END' or '-s <symbol>' for raw code]",
+                        lang.name()
+                    ));
+                    v
+                }
+            }
+            ReadMode::Auto => unreachable!(),
         }
-        ReadMode::Auto => unreachable!(),
     };
 
-    apply_limits(&mut output_lines, opts);
+    apply_limits(&mut output_lines, opts, !skip_max_chars_in_limits);
     emit_and_log(
         path,
         lang,
         opts.mode.as_str(),
-        eff_mode.as_str(),
+        eff_mode_label.unwrap_or_else(|| eff_mode.as_str()),
         effective_range.map(|r| r.format()),
         total_lines,
         baseline_bytes,
@@ -225,8 +254,12 @@ fn run_symbol_read(
 
     if ranges.is_empty() {
         let mut msg = format!("symbol '{sym}' not found in '{path}'");
-        let suggestions =
-            outline::suggest_symbols(&clean_lines, lang, queries.first().copied().unwrap_or(sym), 3);
+        let suggestions = outline::suggest_symbols(
+            &clean_lines,
+            lang,
+            queries.first().copied().unwrap_or(sym),
+            3,
+        );
         if !suggestions.is_empty() {
             msg.push_str("\nClosest symbols:\n");
             for s in suggestions {
@@ -234,7 +267,9 @@ fn run_symbol_read(
                 msg.push_str(&s);
                 msg.push('\n');
             }
-            msg.push_str(&format!("(use 'trm read {path} -r START-END' or '-s <name>')"));
+            msg.push_str(&format!(
+                "(use 'trm read {path} -r START-END' or '-s <name>')"
+            ));
         } else {
             msg.push_str(&format!(" (try 'trm read {path} --outline')"));
         }
@@ -264,7 +299,7 @@ fn run_symbol_read(
         }
     }
 
-    apply_limits(&mut output_lines, opts);
+    apply_limits(&mut output_lines, opts, true);
     emit_and_log(
         path,
         lang,
@@ -278,8 +313,8 @@ fn run_symbol_read(
     )
 }
 
-fn apply_limits(output_lines: &mut Vec<String>, opts: &ReadOptions) {
-    if let Some(limit) = opts.max_chars {
+fn apply_limits(output_lines: &mut Vec<String>, opts: &ReadOptions, apply_char_cap: bool) {
+    if apply_char_cap && let Some(limit) = opts.max_chars {
         for line in output_lines.iter_mut() {
             let content_len = line.strip_suffix('\r').map_or(line.len(), str::len);
             if content_len > limit {
@@ -302,6 +337,40 @@ fn apply_limits(output_lines: &mut Vec<String>, opts: &ReadOptions) {
             "[trm: truncated {omitted} more lines (--max-lines {cap}) — use -r START-END]"
         ));
     }
+}
+
+fn format_minified_lines(
+    lines: &[&str],
+    start_line: usize,
+    total_lines: usize,
+    raw_bytes: usize,
+    cap: usize,
+    line_numbers: bool,
+) -> Vec<String> {
+    let width = digit_width(start_line + lines.len());
+    let mut out = Vec::with_capacity(lines.len() + 1);
+    for (idx, raw_line) in lines.iter().enumerate() {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let char_count = line.chars().count();
+        let body = if char_count > cap {
+            let byte_end = line.char_indices().nth(cap).map_or(line.len(), |(i, _)| i);
+            let omitted = char_count - cap;
+            format!("{}… (+{omitted} chars)", &line[..byte_end])
+        } else {
+            line.to_string()
+        };
+        if line_numbers {
+            let lineno = start_line + idx;
+            out.push(format!("{lineno:>width$}| {body}"));
+        } else {
+            out.push(body);
+        }
+    }
+    out.push(format!(
+        "[trm: minified/wide file ({}, {total_lines} lines) — lines truncated to {cap} chars; use --raw or -c <N> for full]",
+        crate::style::fmt_bytes(raw_bytes)
+    ));
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -440,14 +509,4 @@ fn digit_width(n: usize) -> usize {
         x /= 10;
     }
     d
-}
-
-fn format_size(bytes: usize) -> String {
-    if bytes >= 1_048_576 {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
 }

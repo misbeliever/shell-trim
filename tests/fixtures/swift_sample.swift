@@ -1,0 +1,58 @@
+import Foundation
+import SwiftUI
+
+/* Outer comment
+   /* Nested comment block */
+   still commented out
+*/
+
+// MARK: - Protocol
+
+/// Protocol describing a network session.
+protocol SessionProviding {
+    func send(_ request: String) async throws -> Data
+    var isConnected: Bool { get }
+}
+
+// MARK: - Actor
+
+/// Thread-safe token store.
+actor TokenStore {
+    private var tokens: [String: String] = [:]
+
+    func store(_ value: String, for key: String) {
+        // Inline comment inside actor
+        tokens[key] = value
+    }
+
+    func token(for key: String) -> String? {
+        return tokens[key]
+    }
+}
+
+// MARK: - Main View
+
+/// Primary dashboard view.
+@MainActor
+struct DashboardView: View {
+    @State private var title = "hello // not a comment /* or nested */"
+
+    var body: some View {
+        VStack {
+            Text(title)
+            Button("Refresh") {
+                reload()
+            }
+        }
+    }
+
+    private func reload() {
+        title = "reloaded"
+    }
+}
+
+extension DashboardView {
+    func summary() -> String {
+        return title
+    }
+}

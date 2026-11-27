@@ -14,7 +14,7 @@ pub fn run(bin: &str, opts: &ExecTrimOptions) -> Result<ExitCode, String> {
     })?;
 
     let code = output.status.code().unwrap_or(1);
-    let combined = combine_streams(&output.stdout, &output.stderr);
+    let combined = crate::cargo_cmd::combine_streams(&output.stdout, &output.stderr);
     if combined.is_empty() {
         return Ok(ExitCode::from(code as u8));
     }
@@ -65,20 +65,6 @@ pub fn run(bin: &str, opts: &ExecTrimOptions) -> Result<ExitCode, String> {
     Ok(ExitCode::from(code as u8))
 }
 
-fn combine_streams(stdout: &[u8], stderr: &[u8]) -> String {
-    let mut s = String::with_capacity(stdout.len() + stderr.len() + 1);
-    if !stdout.is_empty() {
-        s.push_str(&String::from_utf8_lossy(stdout));
-    }
-    if !stderr.is_empty() {
-        if !s.is_empty() && !s.ends_with('\n') {
-            s.push('\n');
-        }
-        s.push_str(&String::from_utf8_lossy(stderr));
-    }
-    s
-}
-
 fn is_build_noise(trimmed: &str) -> bool {
     if trimmed.is_empty() {
         return true;
@@ -88,9 +74,7 @@ fn is_build_noise(trimmed: &str) -> bool {
         let rest = &trimmed[1..];
         if let Some((ratio, _)) = rest.split_once(']')
             && ratio.contains('/')
-            && ratio
-                .bytes()
-                .all(|b| b.is_ascii_digit() || b == b'/')
+            && ratio.bytes().all(|b| b.is_ascii_digit() || b == b'/')
         {
             return true;
         }
@@ -248,7 +232,12 @@ pub fn trim_swift_test(raw: &str, success: bool) -> String {
             continue;
         }
 
-        if in_failing_test || (!success && (trimmed.contains("XCTAssert") || trimmed.contains("Expectation failed") || trimmed.contains("failed -"))) {
+        if in_failing_test
+            || (!success
+                && (trimmed.contains("XCTAssert")
+                    || trimmed.contains("Expectation failed")
+                    || trimmed.contains("failed -")))
+        {
             out.push(line);
         }
     }

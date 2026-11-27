@@ -1,4 +1,3 @@
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -6,52 +5,51 @@ use std::process::Command;
 use crate::config::Config;
 use crate::style::Theme;
 
-pub fn installed_agents() -> Vec<(&'static str, &'static str)> {
-    let home = PathBuf::from(
-        env::var("TRM_HOME")
-            .or_else(|_| env::var("HOME"))
-            .unwrap_or_else(|_| ".".into()),
-    );
-    let rule_files: &[(&str, PathBuf)] = &[
+fn agent_rule_files(home: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
+    vec![
         ("codex", home.join(".codex/AGENTS.md")),
-        ("antigravity", home.join(".gemini/config/GEMINI.md")),
+        ("agy", home.join(".gemini/config/GEMINI.md")),
         ("claude", home.join(".claude/CLAUDE.md")),
         ("copilot", home.join(".copilot/copilot-instructions.md")),
         ("pi", home.join(".pi/agent/AGENTS.md")),
         ("cursor", home.join(".cursor/rules/trm.mdc")),
-    ];
-    rule_files
-        .iter()
-        .map(|(agent, path)| {
-            let status = if !path.exists() {
-                "not_installed"
-            } else if let Ok(content) = fs::read_to_string(path) {
-                let trm_cnt = content.matches("<!-- trm:start -->").count();
-                let legacy_cnt = content.matches("<!-- strm:start -->").count();
-                if trm_cnt == 1 && legacy_cnt == 0 {
-                    "installed"
-                } else if trm_cnt > 1 || legacy_cnt > 0 {
-                    "needs_fix"
-                } else {
-                    "no_block"
-                }
-            } else {
-                "unreadable"
-            };
-            (*agent, status)
-        })
+    ]
+}
+
+fn rule_status(path: &std::path::Path) -> (&'static str, usize) {
+    if !path.exists() {
+        return ("not_installed", 0);
+    }
+    let Ok(content) = fs::read_to_string(path) else {
+        return ("unreadable", 0);
+    };
+    let trm_cnt = content.matches("<!-- trm:start -->").count();
+    let status = if trm_cnt == 1 {
+        "installed"
+    } else if trm_cnt > 1 {
+        "needs_fix"
+    } else {
+        "no_block"
+    };
+    (status, trm_cnt)
+}
+
+pub fn installed_agents() -> Vec<(&'static str, &'static str)> {
+    let home = Config::home_dir();
+    agent_rule_files(&home)
+        .into_iter()
+        .map(|(agent, path)| (agent, rule_status(&path).0))
         .collect()
 }
 
 pub fn run() -> Result<(), String> {
     let t = Theme::detect();
-    let home = PathBuf::from(
-        env::var("TRM_HOME")
-            .or_else(|_| env::var("HOME"))
-            .unwrap_or_else(|_| ".".into()),
-    );
+    let home = Config::home_dir();
 
-    println!("{}", t.header_rule("trm doctor", "environment & rules health check"));
+    println!(
+        "{}",
+        t.header_rule("trm doctor", "environment & rules health check")
+    );
 
     // 1. Dependencies in PATH
     println!("\n{}", t.bold("Binaries:"));
@@ -66,35 +64,22 @@ pub fn run() -> Result<(), String> {
 
     // 2. Agent rule files
     println!("\n{}", t.bold("Agent Rules:"));
-    let rule_files: &[(&str, PathBuf)] = &[
-        ("codex", home.join(".codex/AGENTS.md")),
-        ("antigravity", home.join(".gemini/config/GEMINI.md")),
-        ("claude", home.join(".claude/CLAUDE.md")),
-        ("copilot", home.join(".copilot/copilot-instructions.md")),
-        ("pi", home.join(".pi/agent/AGENTS.md")),
-        ("cursor", home.join(".cursor/rules/trm.mdc")),
-    ];
-    for (agent, path) in rule_files {
-        if !path.exists() {
-            println!("  [{}] {:<12} not installed", t.dim("---"), agent);
-            continue;
-        }
-        let Ok(content) = fs::read_to_string(path) else {
-            println!("  [{}] {:<12} unreadable", t.red("err"), agent);
-            continue;
-        };
-        let trm_cnt = content.matches("<!-- trm:start -->").count();
-        let legacy_cnt = content.matches("<!-- strm:start -->").count();
-        if trm_cnt == 1 && legacy_cnt == 0 {
-            println!("  [{}] {:<12} installed cleanly", t.green("ok "), agent);
-        } else if trm_cnt > 1 || legacy_cnt > 0 {
-            println!(
-                "  [{}] {:<12} duplicate/legacy markers (trm={trm_cnt}, strm={legacy_cnt}) — run 'trm install'",
+    for (agent, path) in agent_rule_files(&home) {
+        let (status, trm_cnt) = rule_status(&path);
+        match status {
+            "not_installed" => println!("  [{}] {:<12} not installed", t.dim("---"), agent),
+            "unreadable" => println!("  [{}] {:<12} unreadable", t.red("err"), agent),
+            "installed" => println!("  [{}] {:<12} installed cleanly", t.green("ok "), agent),
+            "needs_fix" => println!(
+                "  [{}] {:<12} duplicate markers (trm={trm_cnt}) — run 'trm install'",
                 t.amber("fix"),
                 agent
-            );
-        } else {
-            println!("  [{}] {:<12} file exists, no trm block — run 'trm install'", t.amber("off"), agent);
+            ),
+            _ => println!(
+                "  [{}] {:<12} file exists, no trm block — run 'trm install'",
+                t.amber("off"),
+                agent
+            ),
         }
     }
 
@@ -104,14 +89,47 @@ pub fn run() -> Result<(), String> {
         let settings_wired = fs::read_to_string(home.join(".claude/settings.json"))
             .is_ok_and(|s| s.contains("trm-rewrite.sh"));
         if executable && settings_wired {
-            println!("  [{}] {:<12} installed & active in settings.json", t.green("ok "), "claude hook");
+            println!(
+                "  [{}] {:<12} installed & active in settings.json",
+                t.green("ok "),
+                "claude hook"
+            );
         } else if !executable {
-            println!("  [{}] {:<12} not executable — run 'trm install --hook'", t.amber("fix"), "claude hook");
+            println!(
+                "  [{}] {:<12} not executable — run 'trm install --hook'",
+                t.amber("fix"),
+                "claude hook"
+            );
         } else {
-            println!("  [{}] {:<12} script installed (not wired in ~/.claude/settings.json)", t.amber("off"), "claude hook");
+            println!(
+                "  [{}] {:<12} script installed (not wired in ~/.claude/settings.json)",
+                t.amber("off"),
+                "claude hook"
+            );
         }
     } else {
-        println!("  [{}] {:<12} not installed (optional: 'trm install --hook')", t.dim("---"), "claude hook");
+        println!(
+            "  [{}] {:<12} not installed (optional: 'trm install --hook')",
+            t.dim("---"),
+            "claude hook"
+        );
+    }
+
+    let agy_hooks_path = home.join(".gemini/config/hooks.json");
+    if agy_hooks_path.exists()
+        && fs::read_to_string(&agy_hooks_path).is_ok_and(|s| s.contains("trm-rewrite"))
+    {
+        println!(
+            "  [{}] {:<12} active in ~/.gemini/config/hooks.json",
+            t.green("ok "),
+            "agy hook"
+        );
+    } else {
+        println!(
+            "  [{}] {:<12} not installed (optional: 'trm install --hook --only agy')",
+            t.dim("---"),
+            "agy hook"
+        );
     }
 
     // 3. Config & telemetry
@@ -143,9 +161,17 @@ pub fn run() -> Result<(), String> {
         let lines = fs::read_to_string(&log_path)
             .map(|s| s.lines().count())
             .unwrap_or(0);
-        println!("  [{}] telemetry: {} ({lines} events)", t.green("ok "), log_path.display());
+        println!(
+            "  [{}] telemetry: {} ({lines} events)",
+            t.green("ok "),
+            log_path.display()
+        );
     } else {
-        println!("  [{}] telemetry: not created yet ({})", t.dim("---"), log_path.display());
+        println!(
+            "  [{}] telemetry: not created yet ({})",
+            t.dim("---"),
+            log_path.display()
+        );
     }
 
     Ok(())

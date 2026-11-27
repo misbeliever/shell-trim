@@ -36,7 +36,7 @@ impl ReadMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineRange {
-    pub start: usize, // 1-based inclusive
+    pub start: usize,       // 1-based inclusive
     pub end: Option<usize>, // 1-based inclusive; None means EOF
 }
 
@@ -136,6 +136,28 @@ pub struct AuditOptions {
     pub by_model: bool,
     pub bypasses: bool,
     pub json: bool,
+    pub context: bool,
+    pub probe_mcp: bool,
+    pub all: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PipeOptions {
+    pub raw: bool,
+    pub all: bool,
+    pub max_lines: Option<usize>,
+    pub log_stats: bool,
+}
+
+impl Default for PipeOptions {
+    fn default() -> Self {
+        Self {
+            raw: false,
+            all: false,
+            max_lines: None,
+            log_stats: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +198,12 @@ pub struct ExportOptions {
     pub since_secs: Option<u64>,
     pub out_path: Option<String>,
     pub redact: bool,
+    pub anon: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct InspectOptions {
+    pub path: String,
 }
 
 #[derive(Debug)]
@@ -189,11 +217,14 @@ pub enum Command {
     Git(ExecTrimOptions),
     Ls(ExecTrimOptions),
     Find(ExecTrimOptions),
+    Pipe(PipeOptions),
+    Hook(crate::hook::HookTarget),
     Ui(UiOptions),
     Doctor,
     Stats(StatsOptions),
     Audit(AuditOptions),
     Export(ExportOptions),
+    Inspect(InspectOptions),
     Install(InstallOptions),
     Uninstall(InstallOptions),
 }
@@ -206,14 +237,17 @@ USAGE:
   trm rg [options] <rg-args...>            (alias: trm grep)
   trm swift [options] <args...>            trim swift build/test output (also: trm swiftc)
   trm cargo [options] <args...>            trim cargo build/check/clippy/test output
-  trm git [options] <args...>              compact git status/diff/log output
+  trm git [options] <args...>              compact git status/diff/log/show output
   trm ls [options] [args...]               compact directory listing (strips ls -l noise)
   trm find [options] [args...]             directory-grouped find (hides .git/target/node_modules)
+  trm pipe [options]                       trim piped stdin (or run bare `cmd | trm`)
+  trm hook <agy|claude>                    PreToolUse hook handler (rewrites raw commands via stdin JSON)
   trm ui [-s|--since 1h|24h|7d|all] [--once]  interactive terminal dashboard (alias: trm top)
   trm doctor                               check PATH, agent rules, config & telemetry health
   trm stats [options]                      (alias: trm gain)
   trm audit [options]                      scan Codex/Antigravity/Claude/Copilot/Pi logs for adoption %
   trm export [options]                     export shareable JSON report with full misses & bypasses (alias: trm report)
+  trm inspect <report.json|->              render a compact summary from a 'trm export' JSON report
   trm install [options]                    install always-on agent rules
   trm uninstall [options]                  cleanly remove trm rules
 
@@ -249,7 +283,7 @@ STATS OPTIONS:
   -a, --by-agent         show breakdown by agent (gross/net, misses, drill-downs)
   -m, --by-model         show breakdown by provider/model
   -l, --by-lang          show breakdown by language
-      --agent <name>     filter stats to one agent (e.g. codex, antigravity, claude)
+      --agent <name>     filter stats to one agent (e.g. codex, agy, claude)
       --model <substr>   filter stats by provider/model substring
       --misses           list detected trim misses (re-reads)
       --recommend        analyze logged data and suggest threshold/config tweaks
@@ -259,18 +293,22 @@ STATS OPTIONS:
 
 AUDIT OPTIONS:
   -s, --since <dur>      scan logs modified within window (default: 7d)
-      --agent <name>     filter to one agent (codex, antigravity, claude, copilot, pi)
+      --agent <name>     filter to one agent (codex, agy, claude, copilot, pi, cursor)
   -m, --by-model         show adoption breakdown by agent/model
   -b, --bypasses         list recent bypassed cat/head/tail/sed/rg/grep commands
   -j, --json             output audit as JSON
+      --context          audit turn-0 token bloat across rules, skills & MCP configs
+      --probe-mcp        probe stdio MCP servers for exact tool schema tokens
+      --all              show all rules, skills & tools in --context output
 
 EXPORT OPTIONS (trm export / trm report):
   -s, --since <dur>      filter window for misses & bypasses (default: 7d)
   -o, --out <file>       write JSON report to file instead of stdout
+      --anon             deterministically hash repo/file paths while keeping extensions
       --no-redact        keep raw $HOME paths and command values unredacted
 
 INSTALL / UNINSTALL OPTIONS:
-      --only <target>    limit to: codex | antigravity | claude | copilot | pi | cursor
+      --only <target>    limit to: codex | agy | claude | copilot | pi | cursor
       --hook             also install Claude Code PreToolUse rewrite helper script
       --dry-run          preview changes without modifying files
 
@@ -283,6 +321,9 @@ AUTO MODE HEURISTICS:
 
 pub fn parse(args: &[String]) -> Result<Command, String> {
     if args.is_empty() {
+        if !std::io::stdin().is_terminal() {
+            return Ok(Command::Pipe(PipeOptions::default()));
+        }
         return Ok(Command::Help);
     }
     match args[0].as_str() {
@@ -304,11 +345,14 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "git" => parse_exec_trim(&args[1..], AllFlagMode::GitDiff, Command::Git),
         "ls" => parse_exec_trim_allow_empty(&args[1..], AllFlagMode::Anywhere, Command::Ls),
         "find" => parse_exec_trim_allow_empty(&args[1..], AllFlagMode::Anywhere, Command::Find),
+        "pipe" => parse_pipe(&args[1..]),
+        "hook" => parse_hook(&args[1..]),
         "ui" | "top" => parse_ui(&args[1..]),
         "doctor" => Ok(Command::Doctor),
         "stats" | "gain" => parse_stats(&args[1..]),
         "audit" => parse_audit(&args[1..]),
         "export" | "report" => parse_export(&args[1..]),
+        "inspect" => parse_inspect(&args[1..]),
         "install" => parse_install(&args[1..], false),
         "uninstall" => parse_install(&args[1..], true),
         other => Err(format!("unknown subcommand '{other}'")),
@@ -520,10 +564,10 @@ fn parse_stats(args: &[String]) -> Result<Command, String> {
             "--agent" => {
                 i += 1;
                 let v = args.get(i).ok_or("missing value for --agent")?;
-                agent_filter = Some(v.to_lowercase());
+                agent_filter = Some(normalize_agent_name(v));
             }
             s if s.starts_with("--agent=") => {
-                agent_filter = Some(s["--agent=".len()..].to_lowercase());
+                agent_filter = Some(normalize_agent_name(&s["--agent=".len()..]));
             }
             "--model" => {
                 i += 1;
@@ -540,9 +584,7 @@ fn parse_stats(args: &[String]) -> Result<Command, String> {
             "--window" => {
                 i += 1;
                 let v = args.get(i).ok_or("missing value for --window")?;
-                reread_window_secs = v
-                    .parse()
-                    .map_err(|_| format!("invalid --window '{v}'"))?;
+                reread_window_secs = v.parse().map_err(|_| format!("invalid --window '{v}'"))?;
             }
             other => return Err(format!("unknown stats option '{other}'")),
         }
@@ -570,6 +612,9 @@ fn parse_audit(args: &[String]) -> Result<Command, String> {
     let mut by_model = false;
     let mut bypasses = false;
     let mut json = false;
+    let mut context = false;
+    let mut probe_mcp = false;
+    let mut all = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -587,14 +632,20 @@ fn parse_audit(args: &[String]) -> Result<Command, String> {
             "--agent" => {
                 i += 1;
                 let v = args.get(i).ok_or("missing value for --agent")?;
-                agent_filter = Some(v.to_lowercase());
+                agent_filter = Some(normalize_agent_name(v));
             }
             s if s.starts_with("--agent=") => {
-                agent_filter = Some(s["--agent=".len()..].to_lowercase());
+                agent_filter = Some(normalize_agent_name(&s["--agent=".len()..]));
             }
             "-m" | "--by-model" => by_model = true,
             "-b" | "--bypasses" => bypasses = true,
             "-j" | "--json" => json = true,
+            "--context" => context = true,
+            "--all" => all = true,
+            "--probe-mcp" => {
+                context = true;
+                probe_mcp = true;
+            }
             other => return Err(format!("unknown audit option '{other}'")),
         }
         i += 1;
@@ -606,6 +657,9 @@ fn parse_audit(args: &[String]) -> Result<Command, String> {
         by_model,
         bypasses,
         json,
+        context,
+        probe_mcp,
+        all,
     }))
 }
 
@@ -613,6 +667,7 @@ fn parse_export(args: &[String]) -> Result<Command, String> {
     let mut since_secs: Option<u64> = Some(7 * 86_400);
     let mut out_path: Option<String> = None;
     let mut redact = true;
+    let mut anon = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -636,6 +691,7 @@ fn parse_export(args: &[String]) -> Result<Command, String> {
                 out_path = Some(s["--out=".len()..].to_string());
             }
             "--no-redact" => redact = false,
+            "--anon" | "--hash-paths" => anon = true,
             other => return Err(format!("unknown export option '{other}'")),
         }
         i += 1;
@@ -645,7 +701,74 @@ fn parse_export(args: &[String]) -> Result<Command, String> {
         since_secs,
         out_path,
         redact,
+        anon,
     }))
+}
+
+fn parse_pipe(args: &[String]) -> Result<Command, String> {
+    let mut opts = PipeOptions::default();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--raw" => opts.raw = true,
+            "--all" => opts.all = true,
+            "--no-stats" => opts.log_stats = false,
+            "-n" | "--max-lines" => {
+                i += 1;
+                let v = args.get(i).ok_or("missing value for -n/--max-lines")?;
+                opts.max_lines = Some(
+                    v.parse()
+                        .map_err(|_| format!("invalid --max-lines '{v}'"))?,
+                );
+            }
+            s if s.starts_with("--max-lines=") => {
+                let v = &s["--max-lines=".len()..];
+                opts.max_lines = Some(
+                    v.parse()
+                        .map_err(|_| format!("invalid --max-lines '{v}'"))?,
+                );
+            }
+            other => return Err(format!("unknown pipe option '{other}'")),
+        }
+        i += 1;
+    }
+    Ok(Command::Pipe(opts))
+}
+
+fn parse_hook(args: &[String]) -> Result<Command, String> {
+    if args.is_empty() {
+        return Err("missing hook target (expected: agy or claude)".into());
+    }
+    match args[0].as_str() {
+        "-h" | "--help" => Ok(Command::Help),
+        "agy" | "antigravity" => Ok(Command::Hook(crate::hook::HookTarget::Agy)),
+        "claude" => Ok(Command::Hook(crate::hook::HookTarget::Claude)),
+        other => Err(format!(
+            "unknown hook target '{other}' (expected: agy or claude)"
+        )),
+    }
+}
+
+fn parse_inspect(args: &[String]) -> Result<Command, String> {
+    let mut path: Option<String> = None;
+    for a in args {
+        match a.as_str() {
+            "-h" | "--help" => return Ok(Command::Help),
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("unknown inspect option '{other}'"));
+            }
+            p => {
+                if path.is_some() {
+                    return Err(format!("unexpected extra argument '{p}'"));
+                }
+                path = Some(p.to_string());
+            }
+        }
+    }
+    let path = path.ok_or("missing report path (usage: trm inspect <report.json|->)")?;
+    Ok(Command::Inspect(InspectOptions { path }))
 }
 
 fn parse_install(args: &[String], uninstall: bool) -> Result<Command, String> {
@@ -662,12 +785,12 @@ fn parse_install(args: &[String], uninstall: bool) -> Result<Command, String> {
             "--hook" => hook = true,
             "--only" => {
                 i += 1;
-                let v = args.get(i).ok_or("missing value for --only")?.to_lowercase();
+                let v = normalize_agent_name(args.get(i).ok_or("missing value for --only")?);
                 validate_install_target(&v)?;
                 only = Some(v);
             }
             s if s.starts_with("--only=") => {
-                let v = s["--only=".len()..].to_lowercase();
+                let v = normalize_agent_name(&s["--only=".len()..]);
                 validate_install_target(&v)?;
                 only = Some(v);
             }
@@ -688,11 +811,18 @@ fn parse_install(args: &[String], uninstall: bool) -> Result<Command, String> {
     })
 }
 
+fn normalize_agent_name(s: &str) -> String {
+    match s.to_lowercase().as_str() {
+        "antigravity" => "agy".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn validate_install_target(s: &str) -> Result<(), String> {
     match s {
-        "codex" | "antigravity" | "claude" | "copilot" | "pi" | "cursor" => Ok(()),
+        "codex" | "agy" | "claude" | "copilot" | "pi" | "cursor" => Ok(()),
         other => Err(format!(
-            "invalid --only target '{other}' (expected: codex, antigravity, claude, copilot, pi, cursor)"
+            "invalid --only target '{other}' (expected: codex, agy, claude, copilot, pi, cursor)"
         )),
     }
 }
@@ -957,7 +1087,10 @@ fn parse_head_tail_alias(args: &[String], is_tail: bool) -> Result<Command, Stri
                     .parse()
                     .map_err(|_| format!("invalid line count '{s}'"))?;
             }
-            s if s.starts_with('-') && s.len() > 1 && s[1..].bytes().all(|b| b.is_ascii_digit()) => {
+            s if s.starts_with('-')
+                && s.len() > 1
+                && s[1..].bytes().all(|b| b.is_ascii_digit()) =>
+            {
                 count = s[1..]
                     .parse()
                     .map_err(|_| format!("invalid line count '{s}'"))?;
@@ -1113,27 +1246,45 @@ mod tests {
     fn line_range_parses_all_separators_and_rejects_invalid() {
         assert_eq!(
             LineRange::parse("40-120").unwrap(),
-            LineRange { start: 40, end: Some(120) }
+            LineRange {
+                start: 40,
+                end: Some(120)
+            }
         );
         assert_eq!(
             LineRange::parse("40:120").unwrap(),
-            LineRange { start: 40, end: Some(120) }
+            LineRange {
+                start: 40,
+                end: Some(120)
+            }
         );
         assert_eq!(
             LineRange::parse("40,120").unwrap(),
-            LineRange { start: 40, end: Some(120) }
+            LineRange {
+                start: 40,
+                end: Some(120)
+            }
         );
         assert_eq!(
             LineRange::parse("42").unwrap(),
-            LineRange { start: 42, end: Some(42) }
+            LineRange {
+                start: 42,
+                end: Some(42)
+            }
         );
         assert_eq!(
             LineRange::parse("100-").unwrap(),
-            LineRange { start: 100, end: None }
+            LineRange {
+                start: 100,
+                end: None
+            }
         );
         assert_eq!(
             LineRange::parse("-50").unwrap(),
-            LineRange { start: 1, end: Some(50) }
+            LineRange {
+                start: 1,
+                end: Some(50)
+            }
         );
         assert!(LineRange::parse("0").is_err());
         assert!(LineRange::parse("0-10").is_err());
@@ -1148,7 +1299,10 @@ mod tests {
         };
         assert_eq!(
             sed_opts.range,
-            Some(LineRange { start: 10, end: Some(30) })
+            Some(LineRange {
+                start: 10,
+                end: Some(30)
+            })
         );
         assert_eq!(sed_opts.paths, vec!["src/main.rs"]);
 
@@ -1213,7 +1367,8 @@ mod tests {
 
     #[test]
     fn short_flags_work_for_stats_audit_export_and_ui() {
-        let Ok(Command::Stats(st)) = parse(&s(&["stats", "-s", "24h", "-a", "-m", "-l", "-j"])) else {
+        let Ok(Command::Stats(st)) = parse(&s(&["stats", "-s", "24h", "-a", "-m", "-l", "-j"]))
+        else {
             panic!("expected Stats");
         };
         assert_eq!(st.since_secs, Some(86_400));

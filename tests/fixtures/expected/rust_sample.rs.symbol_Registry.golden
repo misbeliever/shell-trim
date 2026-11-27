@@ -1,0 +1,21 @@
+[L18-L20]
+pub struct Registry<'a> {
+    items: HashMap<&'a str, String>,
+}
+
+[L22-L36]
+impl<'a> Registry<'a> {
+    /// Creates a new empty registry.
+    pub fn new() -> Self {
+        Self {
+            items: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, key: &'a str, val: &str) {
+        // Contains braces inside a raw string literal:
+        let template = r#"fn fake() { /* not real */ }"#;
+        let _ = template.len();
+        self.items.insert(key, val.to_string());
+    }
+}

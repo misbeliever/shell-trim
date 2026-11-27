@@ -1,0 +1,36 @@
+import asyncio
+from dataclasses import dataclass
+from typing import Callable
+
+
+def retry(
+    times: int = 3,
+    delay: float = 0.1,
+) -> Callable:
+    def wrapper(fn: Callable) -> Callable:
+        return fn
+
+    return wrapper
+
+
+# Plain comment that should be stripped in minimal mode.
+@dataclass
+class JobConfig:
+    """Configuration for a background worker job."""
+
+    name: str
+    concurrency: int = 4
+
+    @retry(
+        times=5,
+        delay=0.5,
+    )
+    async def run(self, payload: dict) -> str:
+        """Execute the job asynchronously."""
+        def inner_helper(x: int) -> int:
+            return x + 1
+
+        result = inner_helper(self.concurrency)
+        # inline debug comment
+        await asyncio.sleep(0)
+        return f"{self.name}:{result}:{len(payload)}"

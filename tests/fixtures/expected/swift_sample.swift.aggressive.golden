@@ -1,0 +1,38 @@
+import Foundation
+import SwiftUI
+… (9 lines omitted: L3-L11)
+protocol SessionProviding {
+    func send(_ request: String) async throws -> Data
+    var isConnected: Bool { get }
+}
+… (4 lines omitted: L16-L19)
+actor TokenStore {
+    private var tokens: [String: String] = [:]
+    func store(_ value: String, for key: String) {
+        tokens[key] = value
+    }
+    func token(for key: String) -> String? {
+        return tokens[key]
+    }
+}
+… (4 lines omitted: L32-L35)
+@MainActor
+struct DashboardView: View {
+    @State private var title = "hello // not a comment /* or nested */"
+    var body: some View {
+        VStack {
+            Text(title)
+            Button("Refresh") {
+                reload()
+            }
+        }
+    }
+    private func reload() {
+        title = "reloaded"
+    }
+}
+extension DashboardView {
+    func summary() -> String {
+        return title
+    }
+}

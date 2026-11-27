@@ -1,0 +1,3 @@
+       L2-6| pub fn compute(a: i32, b: i32) -> i32
+      L8-10| pub fn second() -> &'static str
+[trm: outline of 10 lines (rust) — 'trm read tests/fixtures/crlf_sample.rs -r START-END' or '-s <symbol>' for raw code]

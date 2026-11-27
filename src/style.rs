@@ -21,6 +21,14 @@ impl Theme {
         self.wrap("1;38;5;208", s) // bold Rust orange (#F97316)
     }
 
+    pub fn pill(&self, s: &str) -> String {
+        if self.color {
+            format!("\x1b[1;30;48;5;208m {s} \x1b[0m")
+        } else {
+            format!("[{s}]")
+        }
+    }
+
     pub fn bold(&self, s: &str) -> String {
         self.wrap("1", s)
     }
@@ -123,6 +131,79 @@ pub fn fmt_compact_signed(n: isize) -> String {
     }
 }
 
+pub fn fmt_bytes(bytes: usize) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Visible character width ignoring ANSI CSI escape sequences (`\x1b[...m`).
+pub fn visible_width(s: &str) -> usize {
+    let mut width = 0usize;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.next() == Some('[') {
+                for esc in chars.by_ref() {
+                    if esc.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            width += 1;
+        }
+    }
+    width
+}
+
+/// Truncate a possibly ANSI-styled string to at most `max_w` visible characters,
+/// preventing terminal soft-wrapping while resetting any open ANSI sequence.
+pub fn truncate_ansi(s: &str, max_w: usize) -> String {
+    if visible_width(s) <= max_w {
+        return s.to_string();
+    }
+    if max_w == 0 {
+        return String::new();
+    }
+    let keep = max_w.saturating_sub(1);
+    let mut out = String::with_capacity(s.len());
+    let mut vis = 0usize;
+    let mut saw_ansi = false;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            saw_ansi = true;
+            out.push(c);
+            if let Some(next) = chars.next() {
+                out.push(next);
+                if next == '[' {
+                    for esc in chars.by_ref() {
+                        out.push(esc);
+                        if esc.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if vis < keep {
+            out.push(c);
+            vis += 1;
+        } else {
+            break;
+        }
+    }
+    out.push('…');
+    if saw_ansi {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct Cell {
     pub text: String,
@@ -195,15 +276,27 @@ pub fn render_table(theme: &Theme, headers: &[(&str, bool)], rows: &[Vec<Cell>])
     let bar_seg = |w: usize| "─".repeat(w + 2);
     let top = format!(
         "╭{}╮",
-        widths.iter().map(|&w| bar_seg(w)).collect::<Vec<_>>().join("┬")
+        widths
+            .iter()
+            .map(|&w| bar_seg(w))
+            .collect::<Vec<_>>()
+            .join("┬")
     );
     let mid = format!(
         "├{}┤",
-        widths.iter().map(|&w| bar_seg(w)).collect::<Vec<_>>().join("┼")
+        widths
+            .iter()
+            .map(|&w| bar_seg(w))
+            .collect::<Vec<_>>()
+            .join("┼")
     );
     let bot = format!(
         "╰{}╯",
-        widths.iter().map(|&w| bar_seg(w)).collect::<Vec<_>>().join("┴")
+        widths
+            .iter()
+            .map(|&w| bar_seg(w))
+            .collect::<Vec<_>>()
+            .join("┴")
     );
     let v = theme.dim("│");
 
