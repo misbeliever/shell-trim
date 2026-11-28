@@ -42,12 +42,20 @@ for f in trm-macos-arm64.tar.gz trm-macos-x86_64.tar.gz trm-linux-x86_64.tar.gz;
 done
 ```
 
-Then commit and push `Formula/trm.rb`:
+Then commit and push `Formula/trm.rb` in this repo and mirror it to [`misbeliever/homebrew-tap`](https://github.com/misbeliever/homebrew-tap):
 
 ```sh
 git add Formula/trm.rb
 git commit -m "chore: update Homebrew formula for vX.Y.Z"
 git push origin main
+
+# Sync to misbeliever/homebrew-tap
+git clone --depth 1 https://github.com/misbeliever/homebrew-tap.git /tmp/homebrew-tap
+cp Formula/trm.rb /tmp/homebrew-tap/Formula/trm.rb
+git -C /tmp/homebrew-tap add Formula/trm.rb
+git -C /tmp/homebrew-tap commit -m "chore: update trm formula to vX.Y.Z"
+git -C /tmp/homebrew-tap push origin main
+rm -rf /tmp/homebrew-tap
 ```
 
 ## 5. (Optional) Reinstall locally
