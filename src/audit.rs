@@ -128,6 +128,7 @@ fn scan_sessions(since_secs: Option<u64>, agent_filter: Option<&str>) -> ScanSes
     let mut by_model: BTreeMap<String, AuditBucket> = BTreeMap::new();
     let mut samples: Vec<BypassSample> = Vec::new();
     let mut files_scanned = 0usize;
+    let mut hook_events = crate::telemetry::load_session_cmd_timestamps(since_secs);
 
     let want_agent = |name: &str| -> bool { agent_filter.is_none_or(|f| f == name) };
 
@@ -141,6 +142,7 @@ fn scan_sessions(since_secs: Option<u64>, agent_filter: Option<&str>) -> ScanSes
                     agent,
                     &f,
                     cutoff,
+                    &mut hook_events,
                     &mut by_agent,
                     &mut by_model,
                     &mut samples,
@@ -164,6 +166,7 @@ fn scan_sessions(since_secs: Option<u64>, agent_filter: Option<&str>) -> ScanSes
                         agent,
                         &f,
                         cutoff,
+                        &mut hook_events,
                         &mut by_agent,
                         &mut by_model,
                         &mut samples,
@@ -189,6 +192,7 @@ fn scan_sessions(since_secs: Option<u64>, agent_filter: Option<&str>) -> ScanSes
                             "agy",
                             &transcript,
                             cutoff,
+                            &mut hook_events,
                             &mut by_agent,
                             &mut by_model,
                             &mut samples,
@@ -508,10 +512,182 @@ fn collect_jsonl_files(dir: &Path, cutoff: Option<u64>, out: &mut Vec<PathBuf>) 
     }
 }
 
+fn session_id_for_transcript(agent: &str, path: &Path) -> Option<String> {
+    match agent {
+        "agy" | "antigravity" => path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned()),
+        "claude" => path.file_stem().map(|s| s.to_string_lossy().into_owned()),
+        _ => None,
+    }
+}
+
+fn shell_words(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = cmd.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if let Some(q) = quote {
+            if ch == '\\' && q == '"' {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            } else if ch == q {
+                quote = None;
+            } else {
+                cur.push(ch);
+            }
+        } else if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+        } else if ch.is_whitespace() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn event_matches_sub_cmd(expected_cmd: &str, ev_path: &str, sub_cmd: &str) -> bool {
+    let words = shell_words(sub_cmd);
+    let mut idx = 0;
+    while idx < words.len() {
+        let w = words[idx].as_str();
+        if (w.contains('=') && !w.starts_with('-')) || matches!(w, "env" | "command" | "time") {
+            idx += 1;
+        } else {
+            break;
+        }
+    }
+    if words.get(idx).map(|s| s.rsplit('/').next().unwrap_or(s)) == Some("trm") {
+        idx += 1;
+    }
+    let args = words.get(idx + 1..).unwrap_or(&[]);
+    match expected_cmd {
+        "rg" => {
+            if !ev_path.starts_with("rg:") {
+                return true;
+            }
+            // Filter trm-only flags so `extract_query_key` matches what `search.rs` logged.
+            let rg_args: Vec<String> = args
+                .iter()
+                .filter(|a| {
+                    !matches!(
+                        a.as_str(),
+                        "--raw" | "--all" | "--block" | "--no-block" | "--no-stats"
+                    )
+                })
+                .cloned()
+                .collect();
+            crate::search::extract_query_key(&rg_args) == ev_path
+        }
+        "git" | "cargo" | "swift" => ev_path
+            .split_once(':')
+            .is_none_or(|(_, sub)| sub.is_empty() || args.iter().any(|a| a == sub)),
+        _ => true,
+    }
+}
+
+fn consume_hook_event(
+    hook_events: &mut std::collections::HashMap<(String, String), Vec<(u64, String)>>,
+    sid: &str,
+    expected_cmd: &str,
+    sub_cmd: &str,
+    call_ts: u64,
+) -> bool {
+    let key = (sid.to_string(), expected_cmd.to_string());
+    if let Some(entries) = hook_events.get_mut(&key) {
+        // Telemetry is logged after execution completes (`ev_ts >= call_ts`), so never
+        // match backwards into an earlier command's event; also verify query/subcmd identity.
+        let hi = call_ts.saturating_add(60);
+        if let Some(pos) = entries.iter().position(|(t, path)| {
+            *t >= call_ts && *t <= hi && event_matches_sub_cmd(expected_cmd, path, sub_cmd)
+        }) {
+            entries.remove(pos);
+            return true;
+        }
+    }
+    false
+}
+
+fn explicit_trm_telemetry_cmd(kind: ReadCmdKind, sub_cmd: &str) -> Option<&'static str> {
+    match kind {
+        ReadCmdKind::TrmRead => Some("read"),
+        ReadCmdKind::TrmRg => Some("rg"),
+        ReadCmdKind::TrmFs => Some("fs"),
+        ReadCmdKind::TrmGit => Some("git"),
+        ReadCmdKind::TrmBuild => {
+            fn base(t: &str) -> &str {
+                t.rsplit('/').next().unwrap_or(t)
+            }
+            let mut toks = sub_cmd.split_whitespace();
+            let first = toks.next().map(base);
+            let exec = if first == Some("trm") {
+                toks.next().map(base)
+            } else {
+                first
+            };
+            match exec {
+                Some("swift" | "swiftc") => Some("swift"),
+                _ => Some("cargo"),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn promote_if_hook_rewritten(
+    agent: &str,
+    kind: ReadCmdKind,
+    raw_cmd: &str,
+    sub_cmd: &str,
+    session_id: Option<&str>,
+    ts: Option<u64>,
+    hook_events: &mut std::collections::HashMap<(String, String), Vec<(u64, String)>>,
+) -> ReadCmdKind {
+    if !matches!(agent, "agy" | "antigravity" | "claude") {
+        return kind;
+    }
+    let (expected_cmd, promoted) = match kind {
+        ReadCmdKind::Cat | ReadCmdKind::Head | ReadCmdKind::Tail | ReadCmdKind::SedRead => {
+            ("read", ReadCmdKind::TrmRead)
+        }
+        ReadCmdKind::Rg | ReadCmdKind::Grep => ("rg", ReadCmdKind::TrmRg),
+        ReadCmdKind::Ls | ReadCmdKind::Find => ("fs", ReadCmdKind::TrmFs),
+        ReadCmdKind::Git => ("git", ReadCmdKind::TrmGit),
+        ReadCmdKind::Swift => ("swift", ReadCmdKind::TrmBuild),
+        ReadCmdKind::Cargo => ("cargo", ReadCmdKind::TrmBuild),
+        _ => return kind,
+    };
+    let (Some(sid), Some(call_ts)) = (session_id, ts) else {
+        return kind;
+    };
+    // Both the full command AND this individual segment must be rewritten by the hook.
+    if crate::hook::rewrite_shell_command(raw_cmd).is_none()
+        || crate::hook::rewrite_shell_command(sub_cmd).is_none()
+    {
+        return kind;
+    }
+    if consume_hook_event(hook_events, sid, expected_cmd, sub_cmd, call_ts) {
+        return promoted;
+    }
+    kind
+}
+
 fn scan_file(
     agent: &str,
     path: &Path,
     cutoff: Option<u64>,
+    hook_events: &mut std::collections::HashMap<(String, String), Vec<(u64, String)>>,
     by_agent: &mut BTreeMap<String, AuditBucket>,
     by_model: &mut BTreeMap<String, AuditBucket>,
     samples: &mut Vec<BypassSample>,
@@ -520,8 +696,10 @@ fn scan_file(
         return;
     };
 
+    let session_id = session_id_for_transcript(agent, path);
     let mut current_model = "unknown".to_string();
     let mut current_ts: Option<u64> = None;
+    let mut parsed_cmds: Vec<(Option<u64>, String, String)> = Vec::new();
 
     for line in content.lines() {
         if let Some(m) = extract_json_string_field(line, "\"model\"")
@@ -552,94 +730,125 @@ fn scan_file(
         };
 
         for raw_cmd in cmds {
-            for (kind, sub_cmd) in classify_shell_command(&raw_cmd) {
-                let ab = by_agent.entry(agent.to_string()).or_default();
-                let mb = by_model
-                    .entry(format!("{agent}/{current_model}"))
-                    .or_default();
-                match kind {
-                    ReadCmdKind::TrmRead => {
-                        ab.trm_read += 1;
-                        mb.trm_read += 1;
-                    }
-                    ReadCmdKind::Cat => {
-                        ab.cat += 1;
-                        mb.cat += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "cat", sub_cmd);
-                    }
-                    ReadCmdKind::Head => {
-                        ab.head += 1;
-                        mb.head += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "head", sub_cmd);
-                    }
-                    ReadCmdKind::Tail => {
-                        ab.tail += 1;
-                        mb.tail += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "tail", sub_cmd);
-                    }
-                    ReadCmdKind::SedRead => {
-                        ab.sed_read += 1;
-                        mb.sed_read += 1;
-                        record_sample(
-                            samples,
-                            current_ts,
-                            agent,
-                            &current_model,
-                            "sed -n",
-                            sub_cmd,
-                        );
-                    }
-                    ReadCmdKind::TrmRg => {
-                        ab.trm_rg += 1;
-                        mb.trm_rg += 1;
-                    }
-                    ReadCmdKind::Rg => {
-                        ab.rg += 1;
-                        mb.rg += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "rg", sub_cmd);
-                    }
-                    ReadCmdKind::Grep => {
-                        ab.grep += 1;
-                        mb.grep += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "grep", sub_cmd);
-                    }
-                    ReadCmdKind::TrmBuild => {
-                        ab.trm_build += 1;
-                        mb.trm_build += 1;
-                    }
-                    ReadCmdKind::Swift => {
-                        ab.swift += 1;
-                        mb.swift += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "swift", sub_cmd);
-                    }
-                    ReadCmdKind::Cargo => {
-                        ab.cargo += 1;
-                        mb.cargo += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "cargo", sub_cmd);
-                    }
-                    ReadCmdKind::TrmGit => {
-                        ab.trm_git += 1;
-                        mb.trm_git += 1;
-                    }
-                    ReadCmdKind::Git => {
-                        ab.git += 1;
-                        mb.git += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "git", sub_cmd);
-                    }
-                    ReadCmdKind::TrmFs => {
-                        ab.trm_fs += 1;
-                        mb.trm_fs += 1;
-                    }
-                    ReadCmdKind::Ls => {
-                        ab.ls += 1;
-                        mb.ls += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "ls", sub_cmd);
-                    }
-                    ReadCmdKind::Find => {
-                        ab.find += 1;
-                        mb.find += 1;
-                        record_sample(samples, current_ts, agent, &current_model, "find", sub_cmd);
-                    }
+            parsed_cmds.push((current_ts, current_model.clone(), raw_cmd));
+        }
+    }
+
+    // Pass 1: consume telemetry events belonging to explicit `trm *` calls first
+    // so an explicit `trm rg` can never mask a nearby raw `rg` bypass.
+    if let Some(sid) = session_id.as_deref()
+        && matches!(agent, "agy" | "antigravity" | "claude")
+    {
+        for (ts, _, raw_cmd) in &parsed_cmds {
+            let Some(call_ts) = *ts else {
+                continue;
+            };
+            for (kind, sub_cmd) in classify_shell_command(raw_cmd) {
+                if let Some(trm_cmd) = explicit_trm_telemetry_cmd(kind, &sub_cmd) {
+                    consume_hook_event(hook_events, sid, trm_cmd, &sub_cmd, call_ts);
+                }
+            }
+        }
+    }
+
+    // Pass 2: classify commands and promote only hook-rewritten segments using remaining events.
+    for (current_ts, current_model, raw_cmd) in parsed_cmds {
+        for (raw_kind, sub_cmd) in classify_shell_command(&raw_cmd) {
+            let kind = promote_if_hook_rewritten(
+                agent,
+                raw_kind,
+                &raw_cmd,
+                &sub_cmd,
+                session_id.as_deref(),
+                current_ts,
+                hook_events,
+            );
+            let ab = by_agent.entry(agent.to_string()).or_default();
+            let mb = by_model
+                .entry(format!("{agent}/{current_model}"))
+                .or_default();
+            match kind {
+                ReadCmdKind::TrmRead => {
+                    ab.trm_read += 1;
+                    mb.trm_read += 1;
+                }
+                ReadCmdKind::Cat => {
+                    ab.cat += 1;
+                    mb.cat += 1;
+                    record_sample(samples, current_ts, agent, &current_model, "cat", sub_cmd);
+                }
+                ReadCmdKind::Head => {
+                    ab.head += 1;
+                    mb.head += 1;
+                    record_sample(samples, current_ts, agent, &current_model, "head", sub_cmd);
+                }
+                ReadCmdKind::Tail => {
+                    ab.tail += 1;
+                    mb.tail += 1;
+                    record_sample(samples, current_ts, agent, &current_model, "tail", sub_cmd);
+                }
+                ReadCmdKind::SedRead => {
+                    ab.sed_read += 1;
+                    mb.sed_read += 1;
+                    record_sample(
+                        samples,
+                        current_ts,
+                        agent,
+                        &current_model,
+                        "sed -n",
+                        sub_cmd,
+                    );
+                }
+                ReadCmdKind::TrmRg => {
+                    ab.trm_rg += 1;
+                    mb.trm_rg += 1;
+                }
+                ReadCmdKind::Rg => {
+                    ab.rg += 1;
+                    mb.rg += 1;
+                    record_sample(samples, current_ts, agent, &current_model, "rg", sub_cmd);
+                }
+                ReadCmdKind::Grep => {
+                    ab.grep += 1;
+                    mb.grep += 1;
+                    record_sample(samples, current_ts, agent, &current_model, "grep", sub_cmd);
+                }
+                ReadCmdKind::TrmBuild => {
+                    ab.trm_build += 1;
+                    mb.trm_build += 1;
+                }
+                ReadCmdKind::Swift => {
+                    ab.swift += 1;
+                    mb.swift += 1;
+                    record_sample(samples, current_ts, agent, &current_model, "swift", sub_cmd);
+                }
+                ReadCmdKind::Cargo => {
+                    ab.cargo += 1;
+                    mb.cargo += 1;
+                    record_sample(samples, current_ts, agent, &current_model, "cargo", sub_cmd);
+                }
+                ReadCmdKind::TrmGit => {
+                    ab.trm_git += 1;
+                    mb.trm_git += 1;
+                }
+                ReadCmdKind::Git => {
+                    ab.git += 1;
+                    mb.git += 1;
+                    record_sample(samples, current_ts, agent, &current_model, "git", sub_cmd);
+                }
+                ReadCmdKind::TrmFs => {
+                    ab.trm_fs += 1;
+                    mb.trm_fs += 1;
+                }
+                ReadCmdKind::Ls => {
+                    ab.ls += 1;
+                    mb.ls += 1;
+                    record_sample(samples, current_ts, agent, &current_model, "ls", sub_cmd);
+                }
+                ReadCmdKind::Find => {
+                    ab.find += 1;
+                    mb.find += 1;
+                    record_sample(samples, current_ts, agent, &current_model, "find", sub_cmd);
                 }
             }
         }
@@ -1195,4 +1404,131 @@ pub(crate) fn parse_iso8601_utc(s: &str) -> Option<u64> {
         return None;
     }
     Some((days as u64) * 86_400 + hour * 3_600 + min * 60 + sec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn promotes_hook_rewritten_bypasses_when_telemetry_matches() {
+        let mut events: HashMap<(String, String), Vec<(u64, String)>> = HashMap::new();
+        events.insert(
+            ("sess-1".into(), "cargo".into()),
+            vec![(1_005, "cargo:test".into())],
+        );
+        events.insert(
+            ("sess-1".into(), "rg".into()),
+            vec![(1_005, "rg:token".into())],
+        );
+
+        // Pre-hook `cargo test --offline` with matching `trm cargo` event -> adopted
+        assert_eq!(
+            promote_if_hook_rewritten(
+                "agy",
+                ReadCmdKind::Cargo,
+                "cargo test --offline",
+                "cargo test --offline",
+                Some("sess-1"),
+                Some(1_000),
+                &mut events,
+            ),
+            ReadCmdKind::TrmBuild
+        );
+
+        // Second `cargo test --offline` cannot reuse the already-consumed event -> stays bypass
+        assert_eq!(
+            promote_if_hook_rewritten(
+                "agy",
+                ReadCmdKind::Cargo,
+                "cargo test --offline",
+                "cargo test --offline",
+                Some("sess-1"),
+                Some(1_002),
+                &mut events,
+            ),
+            ReadCmdKind::Cargo
+        );
+
+        // Partial chain: `grep --include=... && rg token src` only rewrites `rg`, NOT `grep`
+        let chain = "grep --include=*.rs token src && rg token src";
+        assert_eq!(
+            promote_if_hook_rewritten(
+                "agy",
+                ReadCmdKind::Grep,
+                chain,
+                "grep --include=*.rs token src",
+                Some("sess-1"),
+                Some(1_000),
+                &mut events,
+            ),
+            ReadCmdKind::Grep
+        );
+        assert_eq!(
+            promote_if_hook_rewritten(
+                "agy",
+                ReadCmdKind::Rg,
+                chain,
+                "rg token src",
+                Some("sess-1"),
+                Some(1_000),
+                &mut events,
+            ),
+            ReadCmdKind::TrmRg
+        );
+
+        // No matching telemetry event in another session -> stays bypass
+        assert_eq!(
+            promote_if_hook_rewritten(
+                "agy",
+                ReadCmdKind::Cargo,
+                "cargo test --offline",
+                "cargo test --offline",
+                Some("other-sess"),
+                Some(1_000),
+                &mut events,
+            ),
+            ReadCmdKind::Cargo
+        );
+
+        // Executable-token classification: `trm cargo test swift_fixture` is cargo, not swift
+        assert_eq!(
+            explicit_trm_telemetry_cmd(ReadCmdKind::TrmBuild, "trm cargo test swift_fixture"),
+            Some("cargo")
+        );
+        assert_eq!(
+            explicit_trm_telemetry_cmd(ReadCmdKind::TrmBuild, "trm swift test"),
+            Some("swift")
+        );
+
+        // Same-second query isolation & no backwards stealing:
+        // explicit `trm rg alphabet` (0 hits) at t=1000 cannot steal `rg:alpha` from t=1000
+        let mut scoped: HashMap<(String, String), Vec<(u64, String)>> = HashMap::new();
+        scoped.insert(
+            ("sess-1".into(), "rg".into()),
+            vec![(1_000, "rg:alpha".into())],
+        );
+        assert!(!consume_hook_event(
+            &mut scoped,
+            "sess-1",
+            "rg",
+            "trm rg alphabet src/",
+            1_000
+        ));
+        assert!(!consume_hook_event(
+            &mut scoped,
+            "sess-1",
+            "rg",
+            "rg alpha src/",
+            1_002
+        ));
+        assert!(consume_hook_event(
+            &mut scoped,
+            "sess-1",
+            "rg",
+            "rg alpha src/",
+            1_000
+        ));
+    }
 }

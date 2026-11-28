@@ -133,6 +133,45 @@ enum StatsLoad {
     },
 }
 
+/// Index of logged `trm` executions keyed by `(session_id, cmd)` -> sorted `(ts, path)` entries.
+/// Used by `audit` to recognize pre-hook raw commands that `trm hook` rewrote at runtime.
+pub(crate) fn load_session_cmd_timestamps(
+    since_secs: Option<u64>,
+) -> std::collections::HashMap<(String, String), Vec<(u64, String)>> {
+    let mut index: std::collections::HashMap<(String, String), Vec<(u64, String)>> =
+        std::collections::HashMap::new();
+    let cutoff = since_secs.map(|d| now_secs().saturating_sub(d));
+    let mut raw = String::new();
+    let lp = primary_log_path();
+    if lp.exists()
+        && let Ok(s) = fs::read_to_string(&lp)
+    {
+        raw.push_str(&s);
+    }
+    if let Some(fb) = fallback_log_path()
+        && fb.exists()
+        && let Ok(s) = fs::read_to_string(&fb)
+    {
+        raw.push_str(&s);
+    }
+    for ev in raw
+        .lines()
+        .filter_map(parse_event)
+        .filter(|e| cutoff.is_none_or(|c| e.ts >= c))
+    {
+        if let Some(sid) = ev.session {
+            index
+                .entry((sid, ev.cmd))
+                .or_default()
+                .push((ev.ts, ev.path));
+        }
+    }
+    for v in index.values_mut() {
+        v.sort_by_key(|(ts, _)| *ts);
+    }
+    index
+}
+
 fn compute_stats(
     since_secs: Option<u64>,
     agent_filter: Option<&str>,
@@ -1030,10 +1069,16 @@ fn collect_recommendations(
         ));
     }
 
-    // 6. Hot repeat-read raw files
+    // 6. Hot repeat-read raw files (ignore small files <= small_lines that should be read raw)
+    let small_lines = crate::config::Config::load().small_lines;
     let mut raw_counts: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for e in events {
-        if e.cmd == "read" && e.eff_mode == "raw" && e.range.is_none() && e.path != "<stdin>" {
+        if e.cmd == "read"
+            && e.eff_mode == "raw"
+            && e.range.is_none()
+            && e.path != "<stdin>"
+            && e.total_lines > small_lines
+        {
             let c = raw_counts.entry(e.path.as_str()).or_default();
             c.0 += 1;
             c.1 += e.out_tokens;
@@ -1041,7 +1086,7 @@ fn collect_recommendations(
     }
     let mut hot: Vec<(&str, usize, usize)> = raw_counts
         .into_iter()
-        .filter(|(_, (cnt, _))| *cnt >= 4)
+        .filter(|(_, (cnt, tok))| *cnt >= 4 && *tok >= 1_500)
         .map(|(p, (cnt, tok))| (p, cnt, tok))
         .collect();
     hot.sort_by_key(|a| std::cmp::Reverse(a.2));

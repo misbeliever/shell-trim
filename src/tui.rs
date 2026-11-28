@@ -75,7 +75,7 @@ pub fn run(opts: &UiOptions) -> Result<(), String> {
         let ctx = context_audit::load_snapshot();
         let (cols, rows) = term_size();
         let frame = render_frame(
-            &theme, tab, label, scroll, paused, cols, rows, &stats, &aud, &ctx,
+            &theme, tab, label, None, scroll, paused, cols, rows, &stats, &aud, &ctx,
         );
         print!("{frame}");
         return Ok(());
@@ -87,34 +87,84 @@ pub fn run(opts: &UiOptions) -> Result<(), String> {
     let mut stats = telemetry::load_snapshot(WINDOWS[win_idx].1);
     let mut aud = audit::load_summary(WINDOWS[win_idx].1);
     let mut ctx = context_audit::load_snapshot();
+    let mut data_win_idx = win_idx;
     let mut last_refresh = Instant::now();
+    let mut last_size_check = Instant::now();
     let mut last_size = term_size();
     let mut needs_redraw = true;
     let mut last_frame = String::new();
+
+    // Offload telemetry / session-log / context disk scans to a background worker
+    // so keypresses (tab switching, scrolling, window cycling, quit) stay <1ms instant.
+    let (req_tx, req_rx) = std::sync::mpsc::channel::<(usize, bool)>();
+    let (res_tx, res_rx) =
+        std::sync::mpsc::channel::<(usize, StatsSnapshot, AuditSummary, Option<ContextSnapshot>)>();
+    let _worker = std::thread::spawn(move || {
+        while let Ok(mut req) = req_rx.recv() {
+            // Coalesce rapid `w` / `r` presses so we only scan the latest requested window.
+            let mut include_ctx = req.1;
+            while let Ok(newer) = req_rx.try_recv() {
+                include_ctx |= newer.1;
+                req = newer;
+            }
+            let secs = WINDOWS[req.0].1;
+            let new_stats = telemetry::load_snapshot(secs);
+            let new_aud = audit::load_summary(secs);
+            let new_ctx = if include_ctx {
+                Some(context_audit::load_snapshot())
+            } else {
+                None
+            };
+            if res_tx.send((req.0, new_stats, new_aud, new_ctx)).is_err() {
+                break;
+            }
+        }
+    });
+    let mut refresh_in_flight = false;
 
     let mut stdin = io::stdin();
     let mut buf = [0u8; 8];
 
     loop {
-        if !paused && last_refresh.elapsed() >= Duration::from_secs(2) {
-            stats = telemetry::load_snapshot(WINDOWS[win_idx].1);
-            aud = audit::load_summary(WINDOWS[win_idx].1);
-            last_refresh = Instant::now();
-            needs_redraw = true;
+        while let Ok((resp_win, new_stats, new_aud, new_ctx)) = res_rx.try_recv() {
+            refresh_in_flight = false;
+            // Context audit has no time window — always apply it even if the user switched windows.
+            if let Some(c) = new_ctx {
+                ctx = c;
+                needs_redraw = true;
+            }
+            if resp_win == win_idx {
+                stats = new_stats;
+                aud = new_aud;
+                data_win_idx = resp_win;
+                needs_redraw = true;
+            }
         }
 
-        let cur_size = term_size();
-        if cur_size != last_size {
-            last_size = cur_size;
-            needs_redraw = true;
+        if !paused && !refresh_in_flight && last_refresh.elapsed() >= Duration::from_secs(2) {
+            if req_tx.send((win_idx, false)).is_ok() {
+                refresh_in_flight = true;
+            }
+            last_refresh = Instant::now();
+        }
+
+        if last_size_check.elapsed() >= Duration::from_millis(300) {
+            let cur_size = term_size();
+            last_size_check = Instant::now();
+            if cur_size != last_size {
+                last_size = cur_size;
+                needs_redraw = true;
+            }
         }
 
         if needs_redraw {
-            let (cols, rows) = cur_size;
+            let (cols, rows) = last_size;
+            let pending_win = (data_win_idx != win_idx).then_some(WINDOWS[win_idx].0);
             let frame = render_frame(
                 &theme,
                 tab,
-                WINDOWS[win_idx].0,
+                WINDOWS[data_win_idx].0,
+                pending_win,
                 scroll,
                 paused,
                 cols,
@@ -131,7 +181,9 @@ pub fn run(opts: &UiOptions) -> Result<(), String> {
                         painted.push('\n');
                     }
                     painted.push_str(line);
-                    painted.push_str("\x1b[K");
+                    if style::visible_width(line) < cols {
+                        painted.push_str("\x1b[K");
+                    }
                 }
                 painted.push_str("\x1b[J\x1b[?2026l");
                 let mut out = io::stdout();
@@ -212,15 +264,16 @@ pub fn run(opts: &UiOptions) -> Result<(), String> {
                     b"w" | b"W" => {
                         win_idx = (win_idx + 1) % WINDOWS.len();
                         scroll = 0;
-                        stats = telemetry::load_snapshot(WINDOWS[win_idx].1);
-                        aud = audit::load_summary(WINDOWS[win_idx].1);
+                        if req_tx.send((win_idx, false)).is_ok() {
+                            refresh_in_flight = true;
+                        }
                         last_refresh = Instant::now();
                         needs_redraw = true;
                     }
                     b"r" | b"R" => {
-                        stats = telemetry::load_snapshot(WINDOWS[win_idx].1);
-                        aud = audit::load_summary(WINDOWS[win_idx].1);
-                        ctx = context_audit::load_snapshot();
+                        if req_tx.send((win_idx, true)).is_ok() {
+                            refresh_in_flight = true;
+                        }
                         last_refresh = Instant::now();
                         needs_redraw = true;
                     }
@@ -265,7 +318,7 @@ fn parse_stty_size(stdout: &[u8]) -> Option<(usize, usize)> {
     if r == 0 || c == 0 {
         return None;
     }
-    Some((c.max(60), r.max(18)))
+    Some((c.max(20), r.max(12)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -273,6 +326,7 @@ pub fn render_frame(
     t: &Theme,
     tab: usize,
     win_label: &str,
+    pending_win: Option<&str>,
     scroll: usize,
     paused: bool,
     cols: usize,
@@ -281,7 +335,9 @@ pub fn render_frame(
     aud: &AuditSummary,
     ctx: &ContextSnapshot,
 ) -> String {
-    let w = cols.max(60);
+    // Always leave 1 trailing column free so no terminal's pending-wrap (`xenl`)
+    // or `\x1b[K` can ever clip the rightmost character (even at <= 60 columns).
+    let w = cols.saturating_sub(1).max(20);
     let mut lines: Vec<String> = Vec::new();
 
     // 1. Top navigation bar with highlighted active tab pill + window selector pills
@@ -315,13 +371,24 @@ pub fn render_frame(
             })
             .collect()
     };
+    let pending_badge = pending_win
+        .map(|p| format!(" {}", t.dim(&format!("→{p}…"))))
+        .unwrap_or_default();
     let pause_badge = if paused {
         format!(" {}", t.amber("[PAUSED]"))
     } else {
         String::new()
     };
     let left_hdr = format!("{}  {}", t.brand("trm"), tab_bar.join(" "));
-    let right_hdr = format!("{}{pause_badge}", win_pills.join(" "));
+    let right_hdr = if w >= 84 {
+        format!(
+            "{} {}{pending_badge}{pause_badge}",
+            t.dim("w:"),
+            win_pills.join(" ")
+        )
+    } else {
+        format!("{}{pending_badge}{pause_badge}", win_pills.join(" "))
+    };
     let left_vis = style::visible_width(&left_hdr);
     let right_vis = style::visible_width(&right_hdr);
     if left_vis + right_vis + 2 <= w {
@@ -372,9 +439,9 @@ pub fn render_frame(
     lines.push(t.dim(&"─".repeat(w)));
 
     let footer_left = if tab == 3 {
-        "  [1-5/←→] view  [w] window  [p] pause  [↑↓/PgUp/Dn] scroll  [r] refresh  [q] quit"
+        "  [1-5/←→] view  [w] time  [p] pause  [↑↓/PgUp/Dn] scroll  [r] refresh  [q] quit"
     } else {
-        "  [1-5/←→] view  [w] window  [↑↓/PgUp/Dn] scroll  [r] refresh  [q] quit"
+        "  [1-5/←→] view  [w] time  [↑↓/PgUp/Dn] scroll  [r] refresh  [q] quit"
     };
     let footer_right = if total_body > body_budget {
         let start = offset + 1;
@@ -1038,24 +1105,40 @@ mod tests {
             mcp_servers: vec![("codex".into(), "node_repl".into(), "stdio: node".into())],
         };
 
-        let overview = render_frame(&t, 0, "24h", 0, false, 120, 30, &stats, &aud, &ctx);
+        let overview = render_frame(
+            &t,
+            0,
+            "24h",
+            Some("7d"),
+            0,
+            false,
+            120,
+            30,
+            &stats,
+            &aud,
+            &ctx,
+        );
         assert!(overview.contains("NET SAVED"));
         assert!(overview.contains("TURN-0 TAX"));
         assert!(overview.contains("agy: 3.0K tok"));
+        assert!(overview.contains("[24h]"));
+        assert!(overview.contains("→7d…"));
 
-        let context = render_frame(&t, 4, "24h", 0, true, 120, 30, &stats, &aud, &ctx);
+        let context = render_frame(&t, 4, "24h", None, 0, true, 120, 30, &stats, &aud, &ctx);
         assert!(context.contains("[PAUSED]"));
         assert!(context.contains("Turn-0 Tax by Agent"));
         assert!(context.contains("node_repl"));
 
-        // Long plugin list + narrow terminal must never soft-wrap past `cols` or exceed `rows`
+        // Long plugin list + 60-col terminal must leave 1-col right margin (< 60) and stay <= rows
         let wide_ctx = ContextSnapshot {
             disabled_plugins: (0..12)
                 .map(|i| format!("very-long-disabled-plugin-name-{i}"))
                 .collect(),
             ..ctx
         };
-        let narrow = render_frame(&t, 4, "24h", 0, false, 64, 20, &stats, &aud, &wide_ctx);
+        let narrow = render_frame(
+            &t, 4, "24h", None, 0, false, 60, 20, &stats, &aud, &wide_ctx,
+        );
         let narrow_lines: Vec<&str> = narrow.lines().collect();
         assert!(
             narrow_lines.len() <= 20,
@@ -1069,7 +1152,21 @@ mod tests {
         );
         for (idx, line) in narrow_lines.iter().enumerate() {
             let vw = style::visible_width(line);
-            assert!(vw <= 64, "line {idx} overflowed 64 cols ({vw}): {line:?}");
+            assert!(
+                vw < 60,
+                "line {idx} hit right edge at 60 cols ({vw}): {line:?}"
+            );
+        }
+
+        // End-to-end narrow size parsing (40x20) -> render_frame stays strictly < 40 cols
+        let (c40, r20) = parse_stty_size(b"20 40\n").unwrap();
+        assert_eq!((c40, r20), (40, 20));
+        let tiny = render_frame(
+            &t, 4, "24h", None, 0, false, c40, r20, &stats, &aud, &wide_ctx,
+        );
+        for (idx, line) in tiny.lines().enumerate() {
+            let vw = style::visible_width(line);
+            assert!(vw < 40, "line {idx} overflowed 40 cols ({vw}): {line:?}");
         }
     }
 }

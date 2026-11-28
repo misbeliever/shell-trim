@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.1 — Smooth TUI, Clipping Fix & Accurate Hook Audit
+- **`trm audit` hook-rewrite correlation**: 1-to-1 per-segment matching of pre-hook `agy` and `claude` transcript commands against `events.jsonl` by `(session_id, cmd, query/subcmd)` and timestamp (`ev_ts >= call_ts`) so commands intercepted by `trm hook` count as adopted instead of false bypasses.
+- **`trm ui` clipping fix, time shortcut & lag-free input**: leaves a 1-column right margin across all terminal widths (including `<= 60` cols) and guards `\x1b[K` so `[all]` and table right borders never clip; surfaces `w:` next to the top-right time selector (`[w] time` in footer) with a `→<win>…` pending indicator; moves 2s/`w`/`r` disk refreshes onto a background thread (preserving manual context refreshes across window switches and throttling `term_size` polling).
+- **`trm stats --recommend`**: skips small files (`<= small_lines` or `< 1,500` total tokens) from the "Hot repeat raw file" hint so tiny config files like `Cargo.toml` aren't flagged.
+
 ## v0.2.0 — Context Audit, Pipe Trimming, Native Hooks & Redesigned TUI
 - **`trm audit --context`** (`--probe-mcp`, `--all`): audits static **turn-0** token tax across `agy`, `codex`, `claude`, `cursor`, `copilot`, and `pi` — scanning global & repo rules, enabled skills (skipping disabled plugins, `disable-model-invocation: true`, and `skills.json` exclusions), and configured MCP servers (with opt-in `--probe-mcp` stdio JSON-RPC `tools/list` schema sizing).
 - **`trm pipe`** (`cmd | trm`): automatic structured stdin trimming for piped JSON payloads, SQL/TSV tables, and deduplicated logs (keeping error/warn lines verbatim and respecting the never-expand guard).

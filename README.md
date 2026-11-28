@@ -287,9 +287,12 @@ reread_window_secs = 180
 ## Development & License
 
 ```bash
+cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release
 ```
+
+Preview what `trm install` would change without touching any file: `trm install --dry-run`.
 
 Licensed under the [MIT License](LICENSE). See [CHANGELOG.md](CHANGELOG.md) for release notes.

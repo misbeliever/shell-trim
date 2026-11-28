@@ -237,7 +237,7 @@ fn try_expand_blocks(raw: &str, forced: bool) -> Option<String> {
     }
 }
 
-fn extract_query_key(args: &[String]) -> String {
+pub(crate) fn extract_query_key(args: &[String]) -> String {
     // First non-flag argument is usually the search pattern
     let mut skip_next = false;
     for a in args {
