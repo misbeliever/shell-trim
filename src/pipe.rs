@@ -17,7 +17,30 @@ pub fn run(opts: &PipeOptions) -> Result<(), String> {
 
     let raw_bytes = raw_bytes_vec.len();
     let sniff = raw_bytes.min(8192);
-    if raw_bytes_vec[..sniff].contains(&0) {
+    let is_binary = raw_bytes_vec[..sniff].contains(&0);
+
+    if opts.raw {
+        io::stdout()
+            .write_all(&raw_bytes_vec)
+            .map_err(|e| format!("write failed: {e}"))?;
+        if opts.log_stats {
+            let total_lines = raw_bytes_vec.iter().filter(|&&b| b == b'\n').count().max(1);
+            let kind = if is_binary { "binary" } else { "text" };
+            telemetry::log_cmd_event(
+                "pipe",
+                &format!("pipe:{kind}"),
+                kind,
+                "raw",
+                "raw",
+                total_lines,
+                raw_bytes,
+                raw_bytes,
+            );
+        }
+        return Ok(());
+    }
+
+    if is_binary {
         let msg = format!("[trm: binary stdin ({raw_bytes} B) — skipped]\n");
         io::stdout()
             .write_all(msg.as_bytes())
@@ -28,21 +51,18 @@ pub fn run(opts: &PipeOptions) -> Result<(), String> {
     let raw_str = String::from_utf8_lossy(&raw_bytes_vec).into_owned();
     let total_lines = raw_str.lines().count().max(1);
 
-    let (final_out, kind, final_mode) = if opts.raw {
-        (raw_str, "text", "raw")
+    let (rendered, kind, eff_mode) = trim_piped(&raw_str, opts);
+    let (out_bytes, final_mode) = if rendered.len() >= raw_bytes {
+        io::stdout()
+            .write_all(&raw_bytes_vec)
+            .map_err(|e| format!("write failed: {e}"))?;
+        (raw_bytes, "raw")
     } else {
-        let (rendered, kind, eff_mode) = trim_piped(&raw_str, opts);
-        if rendered.len() >= raw_bytes {
-            (raw_str, kind, "raw")
-        } else {
-            (rendered, kind, eff_mode)
-        }
+        io::stdout()
+            .write_all(rendered.as_bytes())
+            .map_err(|e| format!("write failed: {e}"))?;
+        (rendered.len(), eff_mode)
     };
-
-    let out_bytes = final_out.len();
-    io::stdout()
-        .write_all(final_out.as_bytes())
-        .map_err(|e| format!("write failed: {e}"))?;
 
     if opts.log_stats {
         let req_mode = if opts.raw {

@@ -2320,3 +2320,113 @@ fn install_dry_run_leaves_user_config_untouched() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn pipe_raw_preserves_binary_and_non_utf8_bytes() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    for payload in [b"A\0B".as_slice(), b"A\xffB".as_slice()] {
+        let mut child = Command::new(trm_bin())
+            .args(["pipe", "--raw", "--no-stats"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(payload).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, payload, "raw pipe altered bytes");
+    }
+
+    let mut child = Command::new(trm_bin())
+        .args(["pipe", "--no-stats"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"A\0B").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("binary stdin"), "got: {stdout}");
+}
+
+#[test]
+fn git_status_z_passes_through_nul_delimited_bytes() {
+    let dir = temp_dir("git_status_z");
+    let init = Command::new("git")
+        .current_dir(&dir)
+        .args(["init", "-q"])
+        .status()
+        .unwrap();
+    assert!(init.success());
+    fs::write(dir.join("hello.txt"), "hi\n").unwrap();
+
+    let git_out = Command::new("git")
+        .current_dir(&dir)
+        .args(["status", "-z"])
+        .output()
+        .unwrap();
+    assert!(git_out.status.success());
+
+    let trm_out = Command::new(trm_bin())
+        .current_dir(&dir)
+        .args(["git", "--no-stats", "status", "-z"])
+        .output()
+        .unwrap();
+    assert!(trm_out.status.success());
+    assert_eq!(
+        trm_out.stdout, git_out.stdout,
+        "trm git status -z must match git status -z byte-for-byte"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn export_keeps_all_bypasses_past_200_and_anon_hides_operands() {
+    let dir = temp_dir("export_full_bypasses");
+    let claude_proj = dir.join(".claude").join("projects").join("demo");
+    fs::create_dir_all(&claude_proj).unwrap();
+
+    let mut lines = String::new();
+    for i in 0..207 {
+        let cmd = if i % 2 == 0 {
+            format!("cat roadmap-private-{i}.md")
+        } else {
+            format!("rg -n internal-client-{i} src/")
+        };
+        lines.push_str(&format!(
+            r#"{{"timestamp":"2026-11-28T10:{:02}:{:02}Z","message":{{"model":"claude-sonnet-4","content":[{{"type":"tool_use","name":"Bash","input":{{"command":"{cmd}"}}}}]}}}}"#,
+            (i / 60) % 60,
+            i % 60
+        ));
+        lines.push('\n');
+    }
+    fs::write(claude_proj.join("session.jsonl"), lines).unwrap();
+
+    let out = Command::new(trm_bin())
+        .env("TRM_HOME", &dir)
+        .args(["export", "--anon"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let json = String::from_utf8(out.stdout).unwrap();
+    assert!(json.contains("\"bypasses\": 207"), "got: {json}");
+    let exported_count = json.matches("\"kind\": \"").count();
+    assert_eq!(
+        exported_count, 207,
+        "export must not truncate bypasses at 200"
+    );
+    assert!(
+        !json.contains("roadmap-private"),
+        "anon export leaked filename"
+    );
+    assert!(
+        !json.contains("internal-client"),
+        "anon export leaked search term"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}

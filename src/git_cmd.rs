@@ -52,29 +52,44 @@ pub fn run(opts: &ExecTrimOptions) -> Result<ExitCode, String> {
     }
 
     let raw_bytes = output.stdout.len();
-    let raw_str = String::from_utf8_lossy(&output.stdout);
 
-    let should_trim_diff = !opts.raw
+    let may_trim_diff = !opts.raw
         && ((subcmd == "diff" && !is_already_compact_diff(&opts.args[1..]))
-            || (subcmd == "show"
-                && !is_already_compact_show(&opts.args[1..])
-                && (raw_str.starts_with("diff --git ") || raw_str.contains("\ndiff --git "))));
+            || (subcmd == "show" && !is_already_compact_show(&opts.args[1..])));
 
-    let (rendered, eff_mode) = if should_trim_diff {
-        let trimmed = trim_git_diff(&raw_str, opts.all);
-        if trimmed.len() >= raw_bytes {
-            (raw_str.into_owned(), "raw")
+    let (trimmed_opt, eff_mode) = if may_trim_diff {
+        let raw_str = String::from_utf8_lossy(&output.stdout);
+        let should_trim = subcmd == "diff"
+            || raw_str.starts_with("diff --git ")
+            || raw_str.contains("\ndiff --git ");
+        if should_trim {
+            let trimmed = trim_git_diff(&raw_str, opts.all);
+            if trimmed.len() >= raw_bytes {
+                (None, "raw")
+            } else {
+                (Some(trimmed), if opts.all { "all" } else { "trimmed" })
+            }
         } else {
-            (trimmed, if opts.all { "all" } else { "trimmed" })
+            (None, "raw")
         }
     } else {
-        (raw_str.into_owned(), "raw")
+        (None, "raw")
     };
 
-    let out_bytes = rendered.len();
-    io::stdout()
-        .write_all(rendered.as_bytes())
-        .map_err(|e| format!("write failed: {e}"))?;
+    let out_bytes = match trimmed_opt {
+        Some(ref rendered) => {
+            io::stdout()
+                .write_all(rendered.as_bytes())
+                .map_err(|e| format!("write failed: {e}"))?;
+            rendered.len()
+        }
+        None => {
+            io::stdout()
+                .write_all(&output.stdout)
+                .map_err(|e| format!("write failed: {e}"))?;
+            raw_bytes
+        }
+    };
 
     if opts.log_stats && matches!(subcmd, "diff" | "status" | "log" | "show") {
         let key = format!("git:{subcmd}");
@@ -106,8 +121,23 @@ fn raw_bytes_lines(b: &[u8]) -> usize {
 }
 
 fn has_short_status_flag(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| a == "-s" || a == "--short" || a.starts_with("--porcelain"))
+    for a in args {
+        if a == "--" {
+            break;
+        }
+        if a == "--short" || a == "--null" || a.starts_with("--porcelain") {
+            return true;
+        }
+        if a.starts_with('-') && !a.starts_with("--") && a.len() > 1 {
+            let rest = &a[1..];
+            if rest.bytes().all(|b| b.is_ascii_alphabetic())
+                && (rest.contains('s') || rest.contains('z'))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn has_custom_log_format(args: &[String]) -> bool {
@@ -169,14 +199,9 @@ fn run_compact_status(extra_args: &[String], log_stats: bool) -> Result<ExitCode
     let raw_porcelain = String::from_utf8_lossy(&porcelain.stdout);
     let compact = format_porcelain_status(&raw_porcelain);
 
-    // Measure baseline against standard `git status` for honest telemetry
+    // Estimate standard `git status` byte length from porcelain output so we only invoke git once
     let baseline_bytes = if log_stats {
-        Command::new("git")
-            .arg("status")
-            .args(extra_args)
-            .output()
-            .map(|o| o.stdout.len().max(compact.len()))
-            .unwrap_or(compact.len())
+        estimate_verbose_status_bytes(&raw_porcelain).max(compact.len())
     } else {
         compact.len()
     };
@@ -270,6 +295,68 @@ pub fn format_porcelain_status(porcelain: &str) -> String {
     let mut s = out.join("\n");
     s.push('\n');
     s
+}
+
+fn estimate_verbose_status_bytes(porcelain: &str) -> usize {
+    let mut branch_len = 0usize;
+    let mut staged_bytes = 0usize;
+    let mut modified_bytes = 0usize;
+    let mut untracked_bytes = 0usize;
+    let mut conflict_bytes = 0usize;
+    let mut has_staged = false;
+    let mut has_modified = false;
+    let mut has_untracked = false;
+    let mut has_conflicts = false;
+
+    for line in porcelain.lines() {
+        if let Some(b) = line.strip_prefix("## ") {
+            branch_len = b.len();
+            continue;
+        }
+        if line.len() < 4 {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let x = bytes[0] as char;
+        let y = bytes[1] as char;
+        let path_len = line[3..].trim().len();
+
+        if x == '?' && y == '?' {
+            has_untracked = true;
+            untracked_bytes += 2 + path_len;
+        } else if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
+            has_conflicts = true;
+            conflict_bytes += 18 + path_len;
+        } else {
+            if x != ' ' {
+                has_staged = true;
+                staged_bytes += 14 + path_len;
+            }
+            if y != ' ' {
+                has_modified = true;
+                modified_bytes += 14 + path_len;
+            }
+        }
+    }
+
+    let mut total = 12 + branch_len + 48; // "On branch <branch>\nYour branch is up to date...\n\n"
+    if !has_staged && !has_modified && !has_untracked && !has_conflicts {
+        total += 38; // "nothing to commit, working tree clean\n"
+    } else {
+        if has_conflicts {
+            total += 68 + conflict_bytes;
+        }
+        if has_staged {
+            total += 82 + staged_bytes;
+        }
+        if has_modified {
+            total += 165 + modified_bytes;
+        }
+        if has_untracked {
+            total += 88 + untracked_bytes;
+        }
+    }
+    total
 }
 
 fn format_group(label: &str, items: &[String], cap: usize) -> String {
@@ -450,5 +537,18 @@ index 333..444 100644
         assert!(is_already_compact_show(&s(&["-s", "HEAD"])));
         assert!(!is_already_compact_show(&s(&["HEAD"])));
         assert!(!is_already_compact_show(&s(&["abc123"])));
+    }
+
+    #[test]
+    fn recognizes_machine_readable_status_flags() {
+        let s = |v: &[&str]| v.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+        assert!(has_short_status_flag(&s(&["-z"])));
+        assert!(has_short_status_flag(&s(&["-sz"])));
+        assert!(has_short_status_flag(&s(&["-uall", "-z"])));
+        assert!(has_short_status_flag(&s(&["--null"])));
+        assert!(has_short_status_flag(&s(&["--porcelain=v2"])));
+        assert!(has_short_status_flag(&s(&["-s"])));
+        assert!(!has_short_status_flag(&s(&["-b"])));
+        assert!(!has_short_status_flag(&s(&["--", "-z"])));
     }
 }

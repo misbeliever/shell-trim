@@ -13,7 +13,7 @@ use crate::telemetry::{self, Bucket};
 pub fn run(opts: &ExportOptions) -> Result<(), String> {
     let cfg = Config::load();
     let stats = telemetry::load_snapshot(opts.since_secs);
-    let audit_sum = audit::load_summary(opts.since_secs);
+    let audit_sum = audit::load_summary_full(opts.since_secs);
     let agents = doctor::installed_agents();
     let home = Config::home_dir().to_string_lossy().into_owned();
 
@@ -459,18 +459,185 @@ pub(crate) fn anonymize_path(path: &str) -> String {
     }
 }
 
+fn is_safe_subcommand(cmd: &str, tok: &str) -> bool {
+    match cmd {
+        "git" => matches!(
+            tok,
+            "status"
+                | "diff"
+                | "log"
+                | "show"
+                | "branch"
+                | "tag"
+                | "stash"
+                | "fetch"
+                | "pull"
+                | "push"
+                | "commit"
+                | "add"
+                | "checkout"
+                | "switch"
+                | "restore"
+                | "merge"
+                | "rebase"
+                | "reset"
+                | "rev-parse"
+                | "ls-files"
+                | "grep"
+                | "blame"
+        ),
+        "cargo" => matches!(
+            tok,
+            "build"
+                | "check"
+                | "test"
+                | "clippy"
+                | "fmt"
+                | "run"
+                | "bench"
+                | "doc"
+                | "clean"
+                | "update"
+                | "tree"
+                | "metadata"
+        ),
+        "swift" => matches!(tok, "build" | "test" | "run" | "package" | "format"),
+        "trm" => matches!(
+            tok,
+            "read"
+                | "cat"
+                | "head"
+                | "tail"
+                | "sed"
+                | "rg"
+                | "grep"
+                | "git"
+                | "ls"
+                | "find"
+                | "cargo"
+                | "swift"
+                | "swiftc"
+                | "pipe"
+                | "stats"
+                | "audit"
+                | "export"
+                | "inspect"
+                | "ui"
+                | "doctor"
+                | "install"
+                | "uninstall"
+                | "hook"
+        ),
+        _ => false,
+    }
+}
+
+fn is_safe_flag(tok: &str) -> Option<&str> {
+    if tok == "-" || tok == "--" || !tok.starts_with('-') {
+        return None;
+    }
+    if tok.starts_with("--") {
+        let name = tok.split('=').next().unwrap_or(tok);
+        if name.len() > 2
+            && name[2..]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Some(name);
+        }
+        return None;
+    }
+    // Short flag(s): keep only compact ASCII-letter flags (avoid attached operands like -eSECRET or -C/path)
+    let rest = &tok[1..];
+    if !rest.is_empty() && rest.len() <= 4 && rest.bytes().all(|b| b.is_ascii_alphabetic()) {
+        if rest.len() > 1 && matches!(rest.as_bytes()[0], b'e' | b'f' | b'g' | b'C' | b'm') {
+            return None;
+        }
+        return Some(tok);
+    }
+    None
+}
+
 pub(crate) fn anonymize_cmd(cmd: &str) -> String {
-    cmd.split_whitespace()
-        .map(|tok| {
-            let trimmed = tok.trim_matches(|c| c == '\'' || c == '"');
-            if trimmed.contains('/') && !trimmed.starts_with("http") && !trimmed.starts_with('-') {
-                anonymize_path(trimmed)
-            } else {
-                tok.to_string()
+    let mut out: Vec<String> = Vec::new();
+    let mut current_cmd: Option<String> = None;
+    let mut has_subcmd = false;
+
+    for raw_tok in cmd.split_whitespace() {
+        if matches!(raw_tok, "&&" | "||" | ";" | "|") {
+            if !out.is_empty()
+                && !matches!(
+                    out.last().map(|s| s.as_str()),
+                    Some("&&" | "||" | ";" | "|")
+                )
+            {
+                out.push(raw_tok.to_string());
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            current_cmd = None;
+            has_subcmd = false;
+            continue;
+        }
+
+        let tok = raw_tok.trim_matches(|c| c == '\'' || c == '"');
+        if tok.is_empty() {
+            continue;
+        }
+
+        // Skip leading env assignments (KEY=val) before the command token
+        if current_cmd.is_none() {
+            if let Some(eq) = tok.find('=')
+                && eq > 0
+                && tok[..eq]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                continue;
+            }
+            let base = if tok.contains('/') {
+                std::path::Path::new(tok)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("cmd")
+            } else {
+                tok
+            };
+            let clean = if base
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+            {
+                base.to_string()
+            } else {
+                "cmd".to_string()
+            };
+            out.push(clean.clone());
+            current_cmd = Some(clean);
+            has_subcmd = false;
+            continue;
+        }
+
+        if let Some(flag) = is_safe_flag(tok) {
+            out.push(flag.to_string());
+            continue;
+        }
+
+        if !has_subcmd
+            && let Some(ref c) = current_cmd
+            && is_safe_subcommand(c, tok)
+        {
+            out.push(tok.to_string());
+            has_subcmd = true;
+        }
+        // All other positional operands (filenames, search queries, patterns, args) are omitted.
+    }
+
+    while matches!(
+        out.last().map(|s| s.as_str()),
+        Some("&&" | "||" | ";" | "|")
+    ) {
+        out.pop();
+    }
+
+    out.join(" ")
 }
 
 #[cfg(test)]
@@ -499,7 +666,32 @@ mod tests {
         assert!(!a1.contains("secret-project"));
         assert!(!a1.contains("auth"));
         assert_eq!(anonymize_path("git:diff"), "git:diff");
-        let cmd = anonymize_cmd("cat /Users/alice/secret/src/auth.rs");
-        assert!(cmd.starts_with("cat repo_") && cmd.ends_with(".rs"));
+    }
+
+    #[test]
+    fn anonymizes_commands_omitting_filenames_and_search_terms() {
+        assert_eq!(anonymize_cmd("cat roadmap-private.md"), "cat");
+        assert_eq!(anonymize_cmd("cat /Users/alice/secret/src/auth.rs"), "cat");
+        assert_eq!(
+            anonymize_cmd("rg -n -i internal-client-name src/secret.rs"),
+            "rg -n -i"
+        );
+        assert_eq!(
+            anonymize_cmd("rg --glob=secret* -l \"internal client\" ."),
+            "rg --glob -l"
+        );
+        assert_eq!(anonymize_cmd("git status -s"), "git status -s");
+        assert_eq!(
+            anonymize_cmd("git diff --stat src/private.rs"),
+            "git diff --stat"
+        );
+        assert_eq!(
+            anonymize_cmd("SECRET=tok123 cd /Users/alice/repo && cat roadmap-private.md"),
+            "cd && cat"
+        );
+        assert_eq!(
+            anonymize_cmd("trm read -r 1-50 roadmap-private.md"),
+            "trm read -r"
+        );
     }
 }

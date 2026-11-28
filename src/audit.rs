@@ -207,6 +207,14 @@ fn scan_sessions(since_secs: Option<u64>, agent_filter: Option<&str>) -> ScanSes
 }
 
 pub fn load_summary(since_secs: Option<u64>) -> AuditSummary {
+    load_summary_inner(since_secs, Some(200))
+}
+
+pub fn load_summary_full(since_secs: Option<u64>) -> AuditSummary {
+    load_summary_inner(since_secs, None)
+}
+
+fn load_summary_inner(since_secs: Option<u64>, sample_limit: Option<usize>) -> AuditSummary {
     let (by_agent, by_model, mut samples, files_scanned, now) = scan_sessions(since_secs, None);
 
     let mut adopted = 0usize;
@@ -237,6 +245,11 @@ pub fn load_summary(since_secs: Option<u64>) -> AuditSummary {
     models.sort_by_key(|a| std::cmp::Reverse(a.2));
 
     samples.sort_by_key(|s| s.ts.unwrap_or(0));
+    if let Some(limit) = sample_limit
+        && samples.len() > limit
+    {
+        samples.drain(..samples.len() - limit);
+    }
     let recent_bypasses: Vec<String> = samples
         .iter()
         .rev()
@@ -863,9 +876,6 @@ fn record_sample(
     kind: &'static str,
     cmd: String,
 ) {
-    if samples.len() >= 200 {
-        samples.remove(0);
-    }
     samples.push(BypassSample {
         ts,
         agent: agent.to_string(),

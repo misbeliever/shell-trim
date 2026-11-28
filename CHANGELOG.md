@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.2 — Safer Anon Exports, Exact Passthrough & Faster `git status`
+- **`trm export --anon`**: allowlists command names, known subcommands, and safe flags while omitting filenames, search terms, env values, and `--flag=value` payloads.
+- **`trm export` full bypasses**: exports all bypass records without the 200-entry cap; dashboard sampling now caps after timestamp sorting so recent entries aren't dropped.
+- **`trm git status -z` & passthrough**: routes `-z`, `--null`, and combined short flags (`-sz`, etc.) through exact byte-for-byte passthrough without UTF-8 lossy conversion.
+- **`trm git status` single scan**: drops the second `git status` telemetry invocation and estimates baseline bytes from the porcelain output.
+- **`trm pipe --raw`**: writes raw stdin bytes verbatim before binary detection and UTF-8 conversion (preserving NUL and non-UTF-8 bytes).
+
 ## v0.2.1 — Smooth TUI, Clipping Fix & Accurate Hook Audit
 - **`trm audit` hook-rewrite correlation**: 1-to-1 per-segment matching of pre-hook `agy` and `claude` transcript commands against `events.jsonl` by `(session_id, cmd, query/subcmd)` and timestamp (`ev_ts >= call_ts`) so commands intercepted by `trm hook` count as adopted instead of false bypasses.
 - **`trm ui` clipping fix, time shortcut & lag-free input**: leaves a 1-column right margin across all terminal widths (including `<= 60` cols) and guards `\x1b[K` so `[all]` and table right borders never clip; surfaces `w:` next to the top-right time selector (`[w] time` in footer) with a `→<win>…` pending indicator; moves 2s/`w`/`r` disk refreshes onto a background thread (preserving manual context refreshes across window switches and throttling `term_size` polling).
